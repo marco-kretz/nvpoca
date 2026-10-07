@@ -36,12 +36,12 @@ curl -L -o models/depth_anything_v2_vits.pth \
 ## Usage
 
 ```bash
-uv run python -m nvpoca                                  # blur, 1080p30, TensorRT, MobileNetV3, ratio 0.25
-uv run python -m nvpoca --smooth                         # recommended: steadier edges (see Phase 2)
+uv run python -m nvpoca                          # subtle blur 4, smoothing on, 1080p30, TensorRT, MobileNetV3
+uv run python -m nvpoca --blur 10                # stronger blur (16+ = heavy)
 uv run python -m nvpoca --mode replace --bg ~/bg.jpg
-uv run python -m nvpoca --blur 16                         # stronger blur (default 7 = portrait-like)
-uv run python -m nvpoca --smooth --keep-chair            # also keep the chair you sit on (depth model)
-uv run python -m nvpoca --smooth --record clips/x.mjpeg  # keeps last 10 s raw; written on Ctrl+C
+uv run python -m nvpoca --no-smooth              # raw RVM alpha, for comparison
+uv run python -m nvpoca --keep-chair             # experimental: keep the chair you sit on (depth model)
+uv run python -m nvpoca --record clips/x.mjpeg   # keeps last 10 s raw; written on Ctrl+C
 uv run python -m nvpoca --help
 ```
 
@@ -144,3 +144,26 @@ Known limit (`brille`): the chair is mostly hidden there, and the black desk cab
 the right shoulder sits at chair depth, so it gets kept on and off. Depth alone cannot tell
 them apart. Tried and dropped: lower ramp 0.25–0.40 (gray halo over the plain wall, soft
 +50%), EMA on the reference depths (no measurable effect).
+
+### Phase 2 result
+
+Tried replacing RVM with BiRefNet (2024, per-frame segmentation, evaluated via
+`transformers`, not added to the project). Flicker with the same smoothing, 1024×576 input:
+
+| Model | chair | chair2 | brille | infer ms (torch FP16) |
+|---|---|---|---|---|
+| RVM MobileNetV3 (kept) | **0.362** | **0.169** | 0.499 | ~1 (TRT) |
+| BiRefNet_lite-matting | 0.398 | 0.638 | **0.387** | 19 |
+| BiRefNet-matting | 0.668 | 0.185 | 0.723 | 44 |
+
+Without temporal memory BiRefNet toggles the headrest in and out (raw flicker on `chair2`
+3.3 vs RVM 0.57). RVM stays. What helped most in practice: image-motion smoothing and a
+subtle blur (σ 4), where edge errors barely show. Front light instead of the window
+backlight would help any model with dark hair against the dark chair.
+
+Defaults now: MobileNetV3, ratio 0.25, `--smooth 0.15`, `--blur 4`.
+
+Load of the default config live (`--smooth --blur 4`, 1080p30): ~3.5 ms GPU work per 33 ms
+frame, whole-GPU utilisation ~6 % including the desktop, 628 MiB VRAM, ~11 % of one CPU
+core, 1.8 GB RAM (mostly PyTorch/CUDA/TensorRT libraries), NVENC/NVDEC idle (nvJPEG runs on
+the SMs), latency ~12 ms.
