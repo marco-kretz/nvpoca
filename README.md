@@ -27,6 +27,10 @@ mkdir -p models
 for f in rvm_mobilenetv3.pth rvm_resnet50.pth; do
   curl -L -o models/$f https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/$f
 done
+
+# Depth Anything V2 Small for --keep-chair (Apache-2.0, code vendored in nvpoca/depth)
+curl -L -o models/depth_anything_v2_vits.pth \
+  https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth
 ```
 
 ## Usage
@@ -36,6 +40,7 @@ uv run python -m nvpoca                                  # blur, 1080p30, Tensor
 uv run python -m nvpoca --smooth                         # recommended: steadier edges (see Phase 2)
 uv run python -m nvpoca --mode replace --bg ~/bg.jpg
 uv run python -m nvpoca --blur 16                         # stronger blur (default 7 = portrait-like)
+uv run python -m nvpoca --smooth --keep-chair            # also keep the chair you sit on (depth model)
 uv run python -m nvpoca --smooth --record clips/x.mjpeg  # keeps last 10 s raw; written on Ctrl+C
 uv run python -m nvpoca --help
 ```
@@ -119,3 +124,23 @@ glasses frame and headrest at the right side of the head.
 (flicker / lag). Live: 30 fps, latency ~12 ms. Ratio 0.4 keeps the thin glasses rim more
 consistently (brille flicker 0.50 vs 0.57 unsmoothed) but is neutral or worse on the chair
 clips, so 0.25 stays the default.
+
+### Keeping the chair (`--keep-chair`)
+
+RVM only knows people, so the chair behind you is background and its edges flicker where
+your head and shoulders meet it. `--keep-chair` adds Depth Anything V2 Small (518×294,
+torch FP16, +4 ms; live latency ~17 ms) and keeps whatever sits at about your depth near
+your silhouette: depth is normalised between the wall (scene median, 0) and your far side
+(1); the chair measured 0.42–1.07, the desk ≤ 0.23, so 0.35–0.40 is the ramp. Things far in
+front of you (>1.4) and further than ~110 px (1080p) from you are dropped. The coarse mask
+gets its edges from the camera image with a guided filter; the chair uses camera pixels.
+
+| `--smooth` vs `--smooth --keep-chair` (flicker / lag / soft) | chair | chair2 | brille |
+|---|---|---|---|
+| without | 0.362 / 0.67 / 16.8 | 0.169 / 1.24 / 15.9 | **0.499** / 0.79 / 17.3 |
+| with | **0.302 / 0.51 / 13.0** | **0.090 / 0.68 / 13.5** | 0.727 / 0.76 / 18.2 |
+
+Known limit (`brille`): the chair is mostly hidden there, and the black desk cabinet next to
+the right shoulder sits at chair depth, so it gets kept on and off. Depth alone cannot tell
+them apart. Tried and dropped: lower ramp 0.25–0.40 (gray halo over the plain wall, soft
++50%), EMA on the reference depths (no measurable effect).

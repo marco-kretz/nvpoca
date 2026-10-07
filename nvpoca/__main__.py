@@ -67,7 +67,7 @@ def run(args, effect, out_buf, recent):
                     t = time.perf_counter()
                     continue
                 lap("decode")
-                fgr, pha = effect.matte(src)
+                fgr, pha, _ = effect.matte(src)
                 lap("infer")
                 yuyv = gpu.to_yuyv(effect.compose(src, fgr, pha))
                 lap("compose")

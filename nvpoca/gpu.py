@@ -42,6 +42,45 @@ def cover(img: torch.Tensor, h: int, w: int) -> torch.Tensor:
     return img[..., y : y + h, x : x + w]
 
 
+def guided_filter(lr_guide: torch.Tensor, lr_src: torch.Tensor, hr_guide: torch.Tensor, r: int = 2, eps: float = 1e-3) -> torch.Tensor:
+    """Fast guided filter: fit src as a local linear function of the guide at low res, apply at high res.
+    Gives coarse masks the edges of the full-res image."""
+    def box(t):  # count_include_pad=False keeps borders unbiased (zero padding darkens them)
+        return F.avg_pool2d(t, 2 * r + 1, stride=1, padding=r, count_include_pad=False)
+
+    mx, my = box(lr_guide), box(lr_src)
+    a = (box(lr_guide * lr_src) - mx * my) / (box(lr_guide * lr_guide) - mx * mx + eps)
+    b = my - a * mx
+    size = hr_guide.shape[-2:]
+    return F.interpolate(a, size=size, mode="bilinear") * hr_guide + F.interpolate(b, size=size, mode="bilinear")
+
+
+def depth_refs(disp: torch.Tensor, pha: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """(person's far side, scene median) disparity; None if no person is visible."""
+    person = pha > 0.9
+    if person.sum() < 64:
+        return None
+    return torch.quantile(disp[person].float(), 0.1), disp.median()
+
+
+def near_mask(disp: torch.Tensor, pha: torch.Tensor, ref: torch.Tensor, floor: torch.Tensor,
+              low: float = 0.35, high: float = 0.4, cap: float = 1.4, reach: int = 30) -> torch.Tensor:
+    """Soft mask of what sits at about the person's depth (e.g. the chair they sit on).
+
+    disp: (1, 1, h, w) relative disparity (larger = closer); pha: person alpha at the same size.
+    Depth is normalised so the scene median (wall, `floor`) is 0 and the person's far side
+    (`ref`) is 1; values ramp in between low..high. Things beyond `cap` are in front of the
+    person (desk edge right at the camera), not behind, and are dropped; the person's own
+    body is covered by pha anyway. Measured on the recorded clips: chair 0.42-1.07, desk
+    <= 0.23. Only pixels within `reach` px of the person count, so other near-ish objects
+    elsewhere in the room stay background.
+    """
+    norm = (disp - floor) / (ref - floor).clamp(min=1e-3)
+    near = F.max_pool2d(pha, 2 * reach + 1, stride=1, padding=reach) > 0.5
+    keep = ((norm - low) / (high - low)).clamp(0, 1) * ((cap + 0.2 - norm) / 0.2).clamp(0, 1)
+    return keep * near
+
+
 class AlphaSmoother:
     """Per-pixel EMA steered by image motion: where the camera image is static, alpha
     changes are flicker and get damped; where it moves, alpha follows immediately."""
@@ -96,6 +135,22 @@ if __name__ == "__main__":
     src[..., 16:48, 16:48] = torch.tensor([1.0, 0, 0], device=dev)[:, None, None]
     bg = blurred_background(src, pha, sigma=8)
     assert bg[:, 0].max() < 0.01 and bg[:, 1].min() > 0.99, (bg[:, 0].max(), bg[:, 1].min())
+
+    # near_mask: chair next to the person is kept, a desk at mid depth and the far wall are not
+    disp = torch.zeros(1, 1, 40, 80, device=dev)
+    pha = torch.zeros_like(disp)
+    disp[..., 10:, 30:50], pha[..., 10:, 30:50] = 1.0, 1  # person
+    disp[..., 5:, 20:30] = 0.7  # chair, left of the person
+    disp[..., 25:, 50:60] = 0.25  # desk, right of the person
+    disp[..., 25:, 70:] = 0.9  # something close but far from the person
+    k = near_mask(disp, pha, *depth_refs(disp, pha), reach=12)
+    assert k[0, 0, 20, 25] == 1 and k[0, 0, 30, 55] == 0 and k[0, 0, 2, 5] == 0 and k[0, 0, 30, 75] == 0, k
+    # guided filter keeps a coarse mask's edge where the full-res image has it
+    hr = torch.zeros(1, 1, 64, 64, device=dev)
+    hr[..., 33:, :] = 1
+    lr = F.interpolate(hr, size=(16, 16), mode="area")
+    out = guided_filter(lr, lr, hr)
+    assert out[0, 0, 30, 5] < 0.1 and out[0, 0, 36, 5] > 0.9 and out[0, 0, 63, 5] > 0.99, out[0, 0, :, 5]
 
     s = AlphaSmoother()
     a = torch.zeros(1, 1, 16, 16, device=dev)

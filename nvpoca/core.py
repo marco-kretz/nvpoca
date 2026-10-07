@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from linuxpy.video.device import BufferType, Device
 from torchvision.io import ImageReadMode, decode_image, decode_jpeg, read_file
 
@@ -40,6 +41,26 @@ class Matter:
         return fgr, pha
 
 
+class Depth:
+    """Depth Anything V2 Small: relative disparity at a fixed ~518 px input."""
+
+    SIZE = (294, 518)  # multiples of the 14 px ViT patch, ~16:9
+
+    def __init__(self):
+        from nvpoca.depth.dpt import DepthAnythingV2
+
+        self.model = DepthAnythingV2(encoder="vits", features=64, out_channels=[48, 96, 192, 384])
+        self.model.load_state_dict(torch.load(MODELS / "depth_anything_v2_vits.pth", map_location="cpu"))
+        self.model = self.model.eval().cuda().half()
+        self.mean = torch.tensor([0.485, 0.456, 0.406], device="cuda", dtype=torch.half).view(1, 3, 1, 1)
+        self.std = torch.tensor([0.229, 0.224, 0.225], device="cuda", dtype=torch.half).view(1, 3, 1, 1)
+
+    @torch.inference_mode()
+    def __call__(self, src: torch.Tensor) -> torch.Tensor:
+        x = F.interpolate(src, size=self.SIZE, mode="bilinear", antialias=True)
+        return self.model((x - self.mean) / self.std).unsqueeze(1).float()
+
+
 class Effect:
     def __init__(self, args: argparse.Namespace):
         h, w = args.height, args.width
@@ -51,6 +72,7 @@ class Effect:
                 self.matter = TrtMatter(MODELS, args.variant, args.ratio, h, w)
             else:
                 self.matter = Matter(args.variant, args.ratio, h, w)
+        self.depth = Depth() if args.keep_chair and self.matter else None
         self.smoother = gpu.AlphaSmoother(args.smooth) if args.smooth else None
         self.bg = None
         if args.mode == "replace":
@@ -58,14 +80,33 @@ class Effect:
             self.bg = gpu.cover(img[None].half() / 255, h, w)
         self.sigma = args.blur * h / 1080
 
-    def matte(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """(fgr, pha); passthrough returns src with full alpha."""
+    def matte(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(fgr, pha, raw pha before smoothing); passthrough returns src with full alpha."""
         if not self.matter:
-            return src, torch.ones_like(src[:, :1])
+            one = torch.ones_like(src[:, :1])
+            return src, one, one
         fgr, pha = self.matter(src)
+        if self.depth:
+            fgr, pha = self.add_near(src, fgr, pha)
+        raw = pha
         if self.smoother:
             pha = self.smoother(pha, src)
-        return fgr, pha
+        return fgr, pha, raw
+
+    def add_near(self, src, fgr, pha):
+        """Union the person with whatever sits at their depth (chair); the chair uses camera pixels,
+        since RVM's foreground colour is only meaningful on the person."""
+        disp = self.depth(src)
+        person = F.interpolate(pha.float(), size=disp.shape[-2:], mode="area")
+        refs = gpu.depth_refs(disp, person)
+        if refs is None:
+            return fgr, pha
+        near = gpu.near_mask(disp, person, *refs)
+        gray = src.float().mean(1, keepdim=True)
+        near = gpu.guided_filter(F.interpolate(gray, size=disp.shape[-2:], mode="area"), near, gray).clamp(0, 1)
+        alpha = torch.maximum(pha.float(), near)
+        fgr = torch.lerp(src.float(), fgr.float(), pha.float() / alpha.clamp(min=1e-3))
+        return fgr.to(src.dtype), alpha.to(src.dtype)
 
     def compose(self, src: torch.Tensor, fgr: torch.Tensor, pha: torch.Tensor) -> torch.Tensor:
         if not self.matter:
@@ -83,6 +124,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--ratio", type=float, help="RVM downsample_ratio (default: 480px on the long side, 0.25 @1080p)")
     p.add_argument("--smooth", type=float, nargs="?", const=0.15, metavar="MIN_RATE",
                    help="damp alpha flicker where the image is static; MIN_RATE in (0, 1], lower = steadier (default 0.15)")
+    p.add_argument("--keep-chair", action="store_true", help="keep what sits at your depth (chair) via a depth model")
     p.add_argument("--blur", type=float, default=7, help="blur sigma in output pixels at 1080p (portrait ~5-10, heavy 16+)")
     p.add_argument("--record", type=Path, metavar="CLIP", help="keep the last 10 s of raw camera MJPEG, write to CLIP on exit")
     p.add_argument("--input", default="/dev/video0")

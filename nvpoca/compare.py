@@ -128,12 +128,7 @@ def main():
         static = None if prev_gray is None else ((gray - prev_gray).abs() < 3 / 255).float()
         prev_gray = gray
         for i, (_, effect, scores) in enumerate(effects):
-            if effect.smoother:
-                fgr, raw = effect.matter(src)
-                pha = effect.smoother(raw, src)
-            else:
-                fgr, pha = effect.matte(src)
-                raw = pha
+            fgr, pha, raw = effect.matte(src)
             scores(gray, static, pha, raw)
             img = pha.expand(-1, 3, -1, -1) if a.alpha else effect.compose(src, fgr, pha)
             y, x = (i // cols) * h, (i % cols) * w
