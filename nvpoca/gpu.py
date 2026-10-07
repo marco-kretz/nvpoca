@@ -51,7 +51,7 @@ class AlphaSmoother:
 
     def __call__(self, pha: torch.Tensor) -> torch.Tensor:
         if self.prev is None or self.prev.shape != pha.shape:
-            self.prev = pha
+            self.prev = pha.clone()  # callers may reuse the pha buffer
             return pha
         delta = pha - self.prev
         rate = (delta.abs() / self.motion).clamp(self.min_rate, 1)

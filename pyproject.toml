@@ -4,6 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
     "linuxpy>=0.25.0",
+    "onnx>=1.23.2",
+    "onnxscript>=0.7.2",
+    "tensorrt-cu13>=11.3.0.99",
     "torch>=2.14.1",
     "torchvision>=0.29.1",
 ]

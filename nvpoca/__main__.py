@@ -36,6 +36,7 @@ def parse_args():
     p = argparse.ArgumentParser(prog="nvpoca", description="GPU background effects -> v4l2loopback")
     p.add_argument("--mode", choices=["blur", "replace", "passthrough"], default="blur")
     p.add_argument("--bg", type=Path, help="background image for --mode replace")
+    p.add_argument("--backend", choices=["trt", "torch"], default="trt")
     p.add_argument("--variant", choices=["mobilenetv3", "resnet50"], default="mobilenetv3")
     p.add_argument("--ratio", type=float, help="RVM downsample_ratio (default: ~480px on the long side)")
     p.add_argument("--smooth", action="store_true", help="adaptive temporal smoothing of alpha")
@@ -57,8 +58,16 @@ def main():
     args = parse_args()
     w, h = args.width, args.height
     torch.backends.cudnn.benchmark = True
+    torch.cuda.set_stream(torch.cuda.Stream())  # TensorRT syncs extra on the legacy default stream
 
-    matter = Matter(args.variant, args.ratio, h, w) if args.mode != "passthrough" else None
+    matter = None
+    if args.mode != "passthrough":
+        if args.backend == "trt":
+            from nvpoca.trt import TrtMatter
+
+            matter = TrtMatter(MODELS, args.variant, args.ratio, h, w)
+        else:
+            matter = Matter(args.variant, args.ratio, h, w)
     smoother = gpu.AlphaSmoother() if args.smooth else None
     bg = None
     if args.mode == "replace":
@@ -77,7 +86,7 @@ def main():
             raise SystemExit(f"camera refused {w}x{h} MJPG, got {fmt.width}x{fmt.height}")
         out.set_format(BufferType.VIDEO_OUTPUT, w, h, "YUYV")
         out.set_fps(BufferType.VIDEO_OUTPUT, args.fps)
-        print(f"{args.input} {w}x{h} MJPG -> {args.output} YUYV | mode={args.mode} variant={args.variant} "
+        print(f"{args.input} {w}x{h} MJPG -> {args.output} YUYV | mode={args.mode} backend={args.backend} variant={args.variant} "
               f"ratio={args.ratio:.3f} smooth={args.smooth}", flush=True)
 
         stats, frames, dropped = defaultdict(float), 0, 0

@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from torchvision.models.mobilenetv3 import MobileNetV3, InvertedResidualConfig
-from torchvision.transforms.functional import normalize
 
 class MobileNetV3LargeEncoder(MobileNetV3):
     def __init__(self, pretrained: bool = False):
@@ -34,7 +33,10 @@ class MobileNetV3LargeEncoder(MobileNetV3):
         del self.classifier
         
     def forward_single_frame(self, x):
-        x = normalize(x, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        # nvpoca: inline ImageNet normalize; torchvision's version has a data-dependent check that breaks ONNX export
+        mean = x.new_tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
+        std = x.new_tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
+        x = (x - mean) / std
         
         x = self.features[0](x)
         x = self.features[1](x)
