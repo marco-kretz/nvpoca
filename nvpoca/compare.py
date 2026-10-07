@@ -130,7 +130,7 @@ def main():
         for i, (_, effect, scores) in enumerate(effects):
             if effect.smoother:
                 fgr, raw = effect.matter(src)
-                pha = effect.smoother(raw)
+                pha = effect.smoother(raw, src)
             else:
                 fgr, pha = effect.matte(src)
                 raw = pha

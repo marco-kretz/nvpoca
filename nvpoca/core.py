@@ -64,7 +64,7 @@ class Effect:
             return src, torch.ones_like(src[:, :1])
         fgr, pha = self.matter(src)
         if self.smoother:
-            pha = self.smoother(pha)
+            pha = self.smoother(pha, src)
         return fgr, pha
 
     def compose(self, src: torch.Tensor, fgr: torch.Tensor, pha: torch.Tensor) -> torch.Tensor:
@@ -81,9 +81,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", choices=["trt", "torch"], default="trt")
     p.add_argument("--variant", choices=["mobilenetv3", "resnet50"], default="mobilenetv3")
     p.add_argument("--ratio", type=float, help="RVM downsample_ratio (default: 480px on the long side, 0.25 @1080p)")
-    p.add_argument("--smooth", type=float, nargs="?", const=0.3, metavar="MIN_RATE",
-                   help="adaptive temporal smoothing of alpha; MIN_RATE in (0, 1], lower = steadier (default 0.3)")
-    p.add_argument("--blur", type=float, default=16, help="blur sigma in output pixels at 1080p")
+    p.add_argument("--smooth", type=float, nargs="?", const=0.15, metavar="MIN_RATE",
+                   help="damp alpha flicker where the image is static; MIN_RATE in (0, 1], lower = steadier (default 0.15)")
+    p.add_argument("--blur", type=float, default=7, help="blur sigma in output pixels at 1080p (portrait ~5-10, heavy 16+)")
+    p.add_argument("--record", type=Path, metavar="CLIP", help="keep the last 10 s of raw camera MJPEG, write to CLIP on exit")
     p.add_argument("--input", default="/dev/video0")
     p.add_argument("--output", default="/dev/video10")
     p.add_argument("--size", default="1920x1080")

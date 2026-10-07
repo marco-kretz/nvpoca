@@ -43,19 +43,26 @@ def cover(img: torch.Tensor, h: int, w: int) -> torch.Tensor:
 
 
 class AlphaSmoother:
-    """Per-pixel adaptive EMA: small alpha changes (flicker) are damped, large ones
-    (real motion) pass through immediately."""
+    """Per-pixel EMA steered by image motion: where the camera image is static, alpha
+    changes are flicker and get damped; where it moves, alpha follows immediately."""
 
-    def __init__(self, min_rate: float = 0.3, motion: float = 0.1):
-        self.min_rate, self.motion, self.prev = min_rate, motion, None
+    def __init__(self, min_rate: float = 0.15, noise: float = 2 / 255, motion: float = 6 / 255):
+        # noise/motion tuned on recorded clips (README, Phase 2): lower noise lets sensor noise
+        # count as motion (no damping), higher makes slow real motion trail behind
+        self.min_rate, self.noise, self.motion = min_rate, noise, motion
+        self.prev = self.prev_gray = None
 
-    def __call__(self, pha: torch.Tensor) -> torch.Tensor:
+    def __call__(self, pha: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+        gray = F.avg_pool2d(src.float().mean(1, keepdim=True), 4)  # 4x down averages out sensor noise
         if self.prev is None or self.prev.shape != pha.shape:
-            self.prev = pha.clone()  # callers may reuse the pha buffer
+            self.prev, self.prev_gray = pha.clone(), gray  # clone: callers may reuse the pha buffer
             return pha
-        delta = pha - self.prev
-        rate = (delta.abs() / self.motion).clamp(self.min_rate, 1)
-        self.prev = self.prev + rate * delta
+        # widen motion a little so the edges of moving objects count as moving
+        move = F.max_pool2d((gray - self.prev_gray).abs(), 5, stride=1, padding=2)
+        rate = ((move - self.noise) / self.motion).clamp(self.min_rate, 1)
+        rate = F.interpolate(rate, size=pha.shape[-2:], mode="bilinear")
+        self.prev = self.prev + rate.to(pha.dtype) * (pha - self.prev)
+        self.prev_gray = gray
         return self.prev
 
 
@@ -91,8 +98,9 @@ if __name__ == "__main__":
     assert bg[:, 0].max() < 0.01 and bg[:, 1].min() > 0.99, (bg[:, 0].max(), bg[:, 1].min())
 
     s = AlphaSmoother()
-    a = torch.zeros(1, 1, 2, 2, device=dev)
-    s(a)
-    assert torch.allclose(s(a + 0.01), a + 0.003)  # flicker damped
-    assert torch.allclose(s(a + 1), a + 1)  # motion passes through
+    a = torch.zeros(1, 1, 16, 16, device=dev)
+    img = torch.zeros(1, 3, 16, 16, device=dev)
+    s(a, img)
+    assert torch.allclose(s(a + 1, img), a + 0.15)  # static image: alpha jump is flicker, damped
+    assert torch.allclose(s(a + 1, img + 0.5), a + 1)  # image moved: alpha follows at once
     print("ok")

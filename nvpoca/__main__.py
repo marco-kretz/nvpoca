@@ -1,5 +1,5 @@
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import torch
 from linuxpy.video.device import BufferType, Device, VideoCapture
@@ -17,6 +17,20 @@ def main():
 
     effect = Effect(args)
     out_buf = torch.empty(h, w * 2, dtype=torch.uint8, pin_memory=True)
+    recent = deque(maxlen=10 * args.fps) if args.record else None
+    try:
+        run(args, effect, out_buf, recent)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if recent:
+            args.record.parent.mkdir(parents=True, exist_ok=True)
+            args.record.write_bytes(b"".join(recent))  # same format as compare --record
+            print(f"wrote last {len(recent)} frames to {args.record}", flush=True)
+
+
+def run(args, effect, out_buf, recent):
+    w, h = args.width, args.height
 
     with Device(args.input) as cam, Device(args.output) as out:
         configure_camera(cam, w, h, args.fps)
@@ -41,7 +55,10 @@ def main():
                     t = now
 
                 lap("capture", sync=False)
-                data = torch.frombuffer(bytearray(frame.data), dtype=torch.uint8)
+                raw = frame.data
+                if recent is not None:
+                    recent.append(raw)
+                data = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
                 try:
                     src = decode(data)  # the JPEG upload happens inside
                 except RuntimeError as e:  # corrupt MJPEG frames happen on USB hiccups
@@ -73,7 +90,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        pass
+    main()

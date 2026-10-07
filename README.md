@@ -35,7 +35,8 @@ done
 uv run python -m nvpoca                                  # blur, 1080p30, TensorRT, MobileNetV3, ratio 0.25
 uv run python -m nvpoca --smooth                         # recommended: steadier edges (see Phase 2)
 uv run python -m nvpoca --mode replace --bg ~/bg.jpg
-uv run python -m nvpoca --variant resnet50 --blur 24
+uv run python -m nvpoca --blur 16                         # stronger blur (default 7 = portrait-like)
+uv run python -m nvpoca --smooth --record clips/x.mjpeg  # keeps last 10 s raw; written on Ctrl+C
 uv run python -m nvpoca --help
 ```
 
@@ -47,6 +48,9 @@ for the next camera frame (≈ idle), `decode` includes the JPEG upload, `latenc
 camera's USB start-of-frame timestamp to the frame being written to the loopback device.
 
 ## Comparing configs
+
+A clip can also come from a live session (`--record`), so a problem can be captured the
+moment it is visible.
 
 ```bash
 uv run python -m nvpoca.compare clips/chair.mjpeg --record 10      # record a clip once
@@ -97,5 +101,21 @@ mean |Δalpha| ≈ 5e-5.
 
 ResNet50 gives slightly calmer hair edges on `chair`, but on `chair2` it keeps the headrest
 as a pulsing alpha 0.2–0.5 ghost (soft ×2.4) that smoothing cannot remove. MobileNetV3 cuts
-the headrest cleanly, so it stays the default; `--smooth` (min rate 0.3) is the main win.
-Lower min rates barely reduce flicker further while lag keeps growing.
+the headrest cleanly, so it stays the default.
+
+The table above used the first smoother (rate from the size of the alpha change). It can't
+tell a flickering headrest from real motion, since both are large jumps. `--smooth` now
+steers the rate by camera-image motion instead: static image → alpha changes are flicker
+and get damped (min rate 0.15); moving image → alpha follows at once. Third clip `brille`:
+glasses frame and headrest at the right side of the head.
+
+| `--smooth` (MobileNetV3 0.25) | chair | chair2 | brille |
+|---|---|---|---|
+| alpha-driven (old) | 0.452 / 0.72 | 0.345 / 0.71 | 0.554 / 1.24 |
+| image-driven, no noise floor | 0.457 / 0.21 | 0.304 / 0.50 | 0.574 / 0.21 |
+| **image-driven, noise 2/255, motion 6/255** | **0.362 / 0.67** | **0.169** / 1.24 | **0.499 / 0.79** |
+| image-driven, noise 3/255, motion 10/255 | 0.304 / 1.84 | 0.125 / 2.27 | 0.446 / 2.57 |
+
+(flicker / lag). Live: 30 fps, latency ~12 ms. Ratio 0.4 keeps the thin glasses rim more
+consistently (brille flicker 0.50 vs 0.57 unsmoothed) but is neutral or worse on the chair
+clips, so 0.25 stays the default.
