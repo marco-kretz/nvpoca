@@ -32,10 +32,10 @@ done
 ## Usage
 
 ```bash
-uv run python -m nvpoca                                  # blur, 1080p30, TensorRT, ResNet50, ratio 0.4
+uv run python -m nvpoca                                  # blur, 1080p30, TensorRT, MobileNetV3, ratio 0.25
 uv run python -m nvpoca --smooth                         # recommended: steadier edges (see Phase 2)
 uv run python -m nvpoca --mode replace --bg ~/bg.jpg
-uv run python -m nvpoca --variant mobilenetv3 --blur 24
+uv run python -m nvpoca --variant resnet50 --blur 24
 uv run python -m nvpoca --help
 ```
 
@@ -51,13 +51,14 @@ camera's USB start-of-frame timestamp to the frame being written to the loopback
 ```bash
 uv run python -m nvpoca.compare clips/chair.mjpeg --record 10      # record a clip once
 uv run python -m nvpoca.compare clips/chair.mjpeg --alpha \
-  -c "" -c="--variant mobilenetv3" -c="--smooth"                  # labelled grid video + scores
+  -c "" -c="--variant resnet50" -c="--smooth"                     # labelled grid video + scores
 ```
 
 Each `-c` is a set of normal `nvpoca` flags (write it as `-c="..."`). Output is a grid
-video next to the clip (`--alpha` shows the matte instead of the composite) and two scores
+video next to the clip (`--alpha` shows the matte instead of the composite) and three scores
 (x1000, lower is better): `flicker` = alpha change where the camera image did not change,
-`lag` = how far smoothing trails the raw alpha where the image did change.
+`lag` = how far smoothing trails the raw alpha where the image did change, `soft` = share of
+semi-transparent pixels, which exposes background objects kept as a faint ghost.
 
 ## Measurements
 
@@ -81,19 +82,20 @@ All configs hold 30 fps with no drops. Processing adds ~2–4 ms; the rest of `l
 USB transfer of the MJPEG frame (see passthrough). TensorRT vs torch on 60 real frames:
 mean |Δalpha| ≈ 5e-5.
 
-### Phase 2 (quality, clip: sitting in front of a dark office chair, 10 s)
+### Phase 2 (quality, two 10 s clips in front of a dark office chair)
 
-| Config | flicker | lag | infer ms (live) |
-|---|---|---|---|
-| MobileNetV3, ratio 0.25 (Phase 1 default) | 0.627 | – | 0.9 |
-| ResNet50, ratio 0.25 | 0.506 | – | 1.1 |
-| ResNet50, ratio 0.33 | 0.462 | – | |
-| ResNet50, ratio 0.4 (new default) | 0.442 | – | |
-| ResNet50, ratio 0.25, smooth 0.3 | 0.344 | 0.85 | |
-| ResNet50, ratio 0.4, smooth 0.3 | 0.303 | 0.76 | 2.3 |
-| ResNet50, ratio 0.4, smooth 0.5 | 0.327 | 0.65 | |
-| ResNet50, ratio 0.4, smooth 0.15 | 0.295 | 0.83 | |
+`chair`: hair/shoulder edge in front of the chair. `chair2`: head right next to the headrest.
 
-ResNet50 at 0.4 + `--smooth`: 1080p30, end-to-end latency ~15 ms. Below `--smooth 0.3`
-flicker barely improves while lag keeps growing. Remaining flicker sits on dark-on-dark
-edges (hair against the dark acoustic panel, shoulder against the dark shelf).
+| Config | chair flicker / lag / soft | chair2 flicker / lag / soft |
+|---|---|---|
+| MobileNetV3 0.25 (default) | 0.627 / – / 16.3 | 0.568 / – / 15.4 |
+| MobileNetV3 0.25 `--smooth` | 0.452 / 0.72 / 16.4 | **0.345** / 0.71 / **15.5** |
+| ResNet50 0.25 | 0.506 / – / 18.3 | 0.742 / – / 37.9 |
+| ResNet50 0.25 `--smooth` | 0.344 / 0.85 / 18.3 | 0.320 / 0.81 / 38.0 |
+| ResNet50 0.4 | 0.442 / – / 14.6 | 1.089 / – / 32.4 |
+| ResNet50 0.4 `--smooth` | **0.303** / 0.76 / **14.6** | 0.569 / 0.76 / 32.4 |
+
+ResNet50 gives slightly calmer hair edges on `chair`, but on `chair2` it keeps the headrest
+as a pulsing alpha 0.2–0.5 ghost (soft ×2.4) that smoothing cannot remove. MobileNetV3 cuts
+the headrest cleanly, so it stays the default; `--smooth` (min rate 0.3) is the main win.
+Lower min rates barely reduce flicker further while lag keeps growing.

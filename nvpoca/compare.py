@@ -8,6 +8,8 @@
 Prints two scores per config (x1000, lower is better):
   flicker: mean |alpha change| where the camera image did not change (jitter not explained by motion)
   lag:     mean |smoothed - raw alpha| where the image did change (ghosting from --smooth)
+  soft:    share of semi-transparent pixels (0.05 < alpha < 0.95); catches half-kept
+           background objects (e.g. a chair headrest at alpha 0.3) that flicker misses
 """
 
 import argparse
@@ -55,19 +57,20 @@ class Scores:
     """Computed 4x downscaled, which averages out sensor noise."""
 
     def __init__(self):
-        self.prev, self.flicker, self.lag, self.n = None, 0.0, 0.0, 0
+        self.prev, self.flicker, self.lag, self.soft, self.n = None, 0.0, 0.0, 0.0, 0
 
     def __call__(self, gray: torch.Tensor, static: torch.Tensor | None, pha: torch.Tensor, raw: torch.Tensor) -> None:
         a, r = (F.interpolate(t.float(), size=gray.shape[-2:], mode="area") for t in (pha, raw))
         if self.prev is not None and static is not None:
             self.flicker += masked_mean((a - self.prev).abs(), static)
             self.lag += masked_mean((a - r).abs(), 1 - static)
+            self.soft += ((a > 0.05) & (a < 0.95)).float().mean().item()
             self.n += 1
         self.prev = a
 
     def __str__(self) -> str:
         n = max(self.n, 1)
-        return f"flicker={1000 * self.flicker / n:6.3f}  lag={1000 * self.lag / n:6.3f}"
+        return f"flicker={1000 * self.flicker / n:6.3f}  lag={1000 * self.lag / n:6.3f}  soft={1000 * self.soft / n:5.1f}"
 
 
 def label(s: str) -> str:

@@ -79,8 +79,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["blur", "replace", "passthrough"], default="blur")
     p.add_argument("--bg", type=Path, help="background image for --mode replace")
     p.add_argument("--backend", choices=["trt", "torch"], default="trt")
-    p.add_argument("--variant", choices=["mobilenetv3", "resnet50"], default="resnet50")
-    p.add_argument("--ratio", type=float, help="RVM downsample_ratio (default: 768px on the long side, 0.4 @1080p)")
+    p.add_argument("--variant", choices=["mobilenetv3", "resnet50"], default="mobilenetv3")
+    p.add_argument("--ratio", type=float, help="RVM downsample_ratio (default: 480px on the long side, 0.25 @1080p)")
     p.add_argument("--smooth", type=float, nargs="?", const=0.3, metavar="MIN_RATE",
                    help="adaptive temporal smoothing of alpha; MIN_RATE in (0, 1], lower = steadier (default 0.3)")
     p.add_argument("--blur", type=float, default=16, help="blur sigma in output pixels at 1080p")
@@ -96,7 +96,7 @@ def finish_args(p: argparse.ArgumentParser, args: argparse.Namespace) -> argpars
         p.error("--mode replace needs --bg")
     args.width, args.height = map(int, args.size.split("x"))
     if args.ratio is None:
-        args.ratio = min(1.0, 768 / max(args.width, args.height))
+        args.ratio = min(1.0, 480 / max(args.width, args.height))
     return args
 
 
