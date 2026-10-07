@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "local.nvpoca",
+  "name": "nvpoca camera",
+  "version": "1.0.0",
+  "author": "marco",
+  "description": "Status and live controls for the nvpoca virtual camera daemon",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "nvpoca camera",
+    "description": "Shows when the camera is in use, toggles the background effect, adjusts blur and opens a preview",
+    "category": "System",
+    "aliases": ["camera", "webcam", "nvpoca", "blur"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

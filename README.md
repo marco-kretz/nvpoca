@@ -35,22 +35,56 @@ curl -L -o models/depth_anything_v2_vits.pth \
 
 ## Usage
 
+`python -m nvpoca` is a daemon: it keeps `/dev/video10` ready and opens the real camera only
+while an app (browser, Zoom, the preview) reads the virtual one. Settings live in
+`~/.config/nvpoca/settings.json` and can be changed at runtime over D-Bus.
+
 ```bash
-uv run python -m nvpoca                          # subtle blur 4, smoothing on, 1080p30, TensorRT, MobileNetV3
-uv run python -m nvpoca --blur 10                # stronger blur (16+ = heavy)
-uv run python -m nvpoca --mode replace --bg ~/bg.jpg
-uv run python -m nvpoca --no-smooth              # raw RVM alpha, for comparison
-uv run python -m nvpoca --keep-chair             # experimental: keep the chair you sit on (depth model)
-uv run python -m nvpoca --record clips/x.mjpeg   # keeps last 10 s raw; written on Ctrl+C
-uv run python -m nvpoca --help
+# run as a systemd user service (unit file in contrib/, linked from the repo)
+systemctl --user link ~/Development/nvpoca/contrib/nvpoca.service
+systemctl --user enable --now nvpoca.service
+journalctl --user -u nvpoca -f                     # per-second timing while a reader is attached
+
+# or in the foreground; flags given here override the saved settings
+uv run python -m nvpoca --blur 10
+uv run python -m nvpoca --record clips/x.mjpeg     # keeps last 10 s raw; written on Ctrl+C / stop
+uv run python -m nvpoca --keep-chair               # experimental: keep the chair (depth model)
 ```
 
-The first run per (variant, resolution, ratio) builds a TensorRT engine into `models/`
+The first start per (variant, resolution, ratio) builds a TensorRT engine into `models/`
 (~20–40 s). `--backend torch` skips TensorRT.
 
-Every second a line with per-stage milliseconds is logged. `capture` is time spent waiting
-for the next camera frame (≈ idle), `decode` includes the JPEG upload, `latency` is from the
-camera's USB start-of-frame timestamp to the frame being written to the loopback device.
+### D-Bus (`org.nvpoca.Daemon`, session bus)
+
+```bash
+B="busctl --user"; O="org.nvpoca.Daemon /org/nvpoca/Daemon org.nvpoca.Daemon"
+$B get-property $O Active                          # is the camera in use?
+$B set-property $O Enabled b false                 # passthrough
+$B set-property $O Blur d 6                        # 0.5..40, sigma at 1080p
+$B set-property $O Mode s replace                  # blur | replace
+$B set-property $O Background s ~/Pictures/bg.jpg  # needed for replace
+$B set-property $O Smooth d 0                      # 0 = off, else min rate (0.15 default)
+```
+
+Read-only: `Active`, `Fps`, `Latency` (ms). Changes emit `PropertiesChanged`.
+
+### Omarchy shell plugin
+
+`omarchy-plugin/` is a bar widget: camera icon (highlighted while an app uses the camera),
+effect on/off, blur slider, steady-edges toggle, blur/image switch once a background is set,
+and a Preview button that opens `/dev/video10` in mpv (only while no other app streams, since
+v4l2loopback serves one reader at a time).
+
+```bash
+ln -sfn ~/Development/nvpoca/omarchy-plugin ~/.config/omarchy/plugins/local.nvpoca
+omarchy-shell shell rescanPlugins
+omarchy bar put local.nvpoca --before local.proton
+```
+
+Every second while a reader is attached the journal gets a line with per-stage milliseconds.
+`capture` is time spent waiting for the next camera frame (≈ idle), `decode` includes the JPEG
+upload, `latency` is from the camera's USB start-of-frame timestamp to the frame being written
+to the loopback device.
 
 ## Comparing configs
 
@@ -167,3 +201,10 @@ Load of the default config live (`--smooth --blur 4`, 1080p30): ~3.5 ms GPU work
 frame, whole-GPU utilisation ~6 % including the desktop, 628 MiB VRAM, ~11 % of one CPU
 core, 1.8 GB RAM (mostly PyTorch/CUDA/TensorRT libraries), NVENC/NVDEC idle (nvJPEG runs on
 the SMs), latency ~12 ms.
+
+## Phase 3: daemon (Python)
+
+Kept Python instead of a Rust rewrite: the GPU work is ~3.5 ms per frame either way; Rust
+would mainly save RAM and start-up time. Reader detection uses v4l2loopback's
+`V4L2_EVENT_PRI_CLIENT_USAGE` (0x10E00001), which fires on STREAMON/STREAMOFF and also when a
+reader is killed. Idle (camera closed, models loaded): ~530 MB RAM, ~630 MB VRAM, no CPU.

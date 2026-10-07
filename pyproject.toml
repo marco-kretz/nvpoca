@@ -3,6 +3,7 @@ name = "nvpoca"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "dbus-fast>=5.2.0",
     "linuxpy>=0.25.0",
     "onnx>=1.23.2",
     "onnxscript>=0.7.2",

@@ -70,6 +70,10 @@ class TrtMatter:
         for name, t in (("src", self.src), ("fgr", self.fgr), ("pha", self.pha)):
             self.ctx.set_tensor_address(name, t.data_ptr())
 
+    def reset(self) -> None:
+        for r in self.rec_in:
+            r.zero_()
+
     def __call__(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         self.src.copy_(src)
         for i in range(4):

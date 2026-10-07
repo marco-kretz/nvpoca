@@ -1,0 +1,15 @@
+[Unit]
+Description=nvpoca virtual camera (GPU background effects)
+Documentation=file://%h/Development/nvpoca/README.md
+
+[Service]
+# Type=dbus: systemd counts the service as up once it owns its bus name (models loaded, device ready)
+Type=dbus
+BusName=org.nvpoca.Daemon
+WorkingDirectory=%h/Development/nvpoca
+ExecStart=%h/Development/nvpoca/.venv/bin/python -m nvpoca
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

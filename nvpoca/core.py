@@ -22,6 +22,11 @@ def decode(data: torch.Tensor) -> torch.Tensor:
     return decode_jpeg(data, device="cuda")[None].half().div_(255)
 
 
+def load_image(path: Path) -> torch.Tensor:
+    """(3, H, W) uint8 RGB on CPU; raises on unreadable files."""
+    return decode_image(read_file(str(path)), mode=ImageReadMode.RGB)
+
+
 class Matter:
     """RVM with its recurrent state carried across frames."""
 
@@ -33,6 +38,9 @@ class Matter:
         # warm up cuDNN autotuning before the camera streams, else the first frames queue up for seconds
         for _ in range(3):
             self(torch.zeros(1, 3, h, w, device="cuda", dtype=torch.half))
+        self.rec = [None] * 4
+
+    def reset(self) -> None:
         self.rec = [None] * 4
 
     @torch.inference_mode()
@@ -62,27 +70,44 @@ class Depth:
 
 
 class Effect:
+    """Matting + composition. mode/blur/smooth/background can change between frames (daemon)."""
+
     def __init__(self, args: argparse.Namespace):
-        h, w = args.height, args.width
+        self.h, self.w = args.height, args.width
         self.matter = None
         if args.mode != "passthrough":
             if args.backend == "trt":
                 from nvpoca.trt import TrtMatter
 
-                self.matter = TrtMatter(MODELS, args.variant, args.ratio, h, w)
+                self.matter = TrtMatter(MODELS, args.variant, args.ratio, self.h, self.w)
             else:
-                self.matter = Matter(args.variant, args.ratio, h, w)
+                self.matter = Matter(args.variant, args.ratio, self.h, self.w)
         self.depth = Depth() if args.keep_chair and self.matter else None
-        self.smoother = gpu.AlphaSmoother(args.smooth) if args.smooth else None
-        self.bg = None
-        if args.mode == "replace":
-            img = decode_image(read_file(str(args.bg)), mode=ImageReadMode.RGB).cuda()
-            self.bg = gpu.cover(img[None].half() / 255, h, w)
-        self.sigma = args.blur * h / 1080
+        self.mode = args.mode
+        self.set_smooth(args.smooth)
+        self.set_blur(args.blur)
+        self.set_background(load_image(args.bg) if args.bg else None)
+
+    def set_smooth(self, min_rate: float | None) -> None:
+        self.smoother = gpu.AlphaSmoother(min_rate) if min_rate else None
+
+    def set_blur(self, sigma_1080p: float) -> None:
+        self.sigma = sigma_1080p * self.h / 1080
+
+    def set_background(self, img: torch.Tensor | None) -> None:
+        """img: (3, H, W) uint8 on any device, or None."""
+        self.bg = gpu.cover(img.cuda()[None].half() / 255, self.h, self.w) if img is not None else None
+
+    def reset(self) -> None:
+        """Forget temporal state, e.g. when the camera restarts."""
+        if self.matter:
+            self.matter.reset()
+        if self.smoother:
+            self.smoother.prev = None
 
     def matte(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(fgr, pha, raw pha before smoothing); passthrough returns src with full alpha."""
-        if not self.matter:
+        if not self.matter or self.mode == "passthrough":
             one = torch.ones_like(src[:, :1])
             return src, one, one
         fgr, pha = self.matter(src)
@@ -109,9 +134,12 @@ class Effect:
         return fgr.to(src.dtype), alpha.to(src.dtype)
 
     def compose(self, src: torch.Tensor, fgr: torch.Tensor, pha: torch.Tensor) -> torch.Tensor:
-        if not self.matter:
+        if not self.matter or self.mode == "passthrough":
             return src
-        back = self.bg if self.bg is not None else gpu.blurred_background(src, pha, self.sigma)
+        if self.mode == "replace" and self.bg is not None:
+            back = self.bg
+        else:
+            back = gpu.blurred_background(src, pha, self.sigma)
         return gpu.composite(fgr, pha, back)
 
 
