@@ -19,6 +19,8 @@ Panel {
   readonly property bool previewing: preview.running
   // v4l2loopback serves one reader at a time, so the preview only works while no app streams.
   readonly property bool canPreview: running && (!active || previewing)
+  // filled = the real camera is open, outline = idle, crossed out = daemon down
+  readonly property string icon: !running ? "\u{F0568}" : active ? "\u{F0567}" : "\u{F0BDC}"
 
   readonly property string statusText: !running ? "Daemon not running"
     : active ? (previewing ? "Preview" : "In use") + " · " + Math.round(props.Fps || 0) + " fps · " + (props.Latency || 0).toFixed(0) + " ms"
@@ -86,7 +88,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.running && root.enabled ? "\u{F0567}" : "\u{F0568}"
+    text: root.icon
     opacity: root.running ? 1 : 0.5
     active: root.active
     activeColor: Color.accent
@@ -123,7 +125,7 @@ Panel {
           title: "Background effect"
           meta: root.statusText
           iconComponent: Text {
-            text: root.active ? "\u{F0567}" : "\u{F0568}"
+            text: root.icon
             color: root.active ? Color.accent : root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.display

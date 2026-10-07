@@ -81,6 +81,10 @@ omarchy-shell shell rescanPlugins
 omarchy bar put local.nvpoca --before local.proton
 ```
 
+Bar icon: crossed out = daemon not running, outline = idle (camera off), filled + accent =
+camera in use. The shell watches plugins with `inotifywait -r`, which does not follow the
+symlink, so after editing the plugin run `omarchy restart shell`.
+
 Every second while a reader is attached the journal gets a line with per-stage milliseconds.
 `capture` is time spent waiting for the next camera frame (≈ idle), `decode` includes the JPEG
 upload, `latency` is from the camera's USB start-of-frame timestamp to the frame being written
