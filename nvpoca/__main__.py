@@ -1,89 +1,25 @@
-import argparse
 import time
 from collections import defaultdict
-from pathlib import Path
 
 import torch
 from linuxpy.video.device import BufferType, Device, VideoCapture
-from torchvision.io import ImageReadMode, decode_image, decode_jpeg, read_file
 
 from nvpoca import gpu
-from nvpoca.rvm.model import MattingNetwork
-
-MODELS = Path(__file__).resolve().parent.parent / "models"
-
-
-class Matter:
-    """RVM with its recurrent state carried across frames."""
-
-    def __init__(self, variant: str, ratio: float, h: int, w: int):
-        self.model = MattingNetwork(variant).eval().cuda()
-        self.model.load_state_dict(torch.load(MODELS / f"rvm_{variant}.pth", map_location="cuda"))
-        self.model.half()
-        self.ratio, self.rec = ratio, [None] * 4
-        # warm up cuDNN autotuning before the camera streams, else the first frames queue up for seconds
-        for _ in range(3):
-            self(torch.zeros(1, 3, h, w, device="cuda", dtype=torch.half))
-        self.rec = [None] * 4
-
-    @torch.inference_mode()
-    def __call__(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        fgr, pha, *self.rec = self.model(src, *self.rec, downsample_ratio=self.ratio)
-        return fgr, pha
-
-
-def parse_args():
-    p = argparse.ArgumentParser(prog="nvpoca", description="GPU background effects -> v4l2loopback")
-    p.add_argument("--mode", choices=["blur", "replace", "passthrough"], default="blur")
-    p.add_argument("--bg", type=Path, help="background image for --mode replace")
-    p.add_argument("--backend", choices=["trt", "torch"], default="trt")
-    p.add_argument("--variant", choices=["mobilenetv3", "resnet50"], default="mobilenetv3")
-    p.add_argument("--ratio", type=float, help="RVM downsample_ratio (default: ~480px on the long side)")
-    p.add_argument("--smooth", action="store_true", help="adaptive temporal smoothing of alpha")
-    p.add_argument("--blur", type=float, default=16, help="blur sigma in output pixels at 1080p")
-    p.add_argument("--input", default="/dev/video0")
-    p.add_argument("--output", default="/dev/video10")
-    p.add_argument("--size", default="1920x1080")
-    p.add_argument("--fps", type=int, default=30)
-    args = p.parse_args()
-    if args.mode == "replace" and not args.bg:
-        p.error("--mode replace needs --bg")
-    args.width, args.height = map(int, args.size.split("x"))
-    if args.ratio is None:
-        args.ratio = min(1.0, 480 / max(args.width, args.height))
-    return args
+from nvpoca.core import Effect, configure_camera, decode, finish_args, parser
 
 
 def main():
-    args = parse_args()
+    p = parser()
+    args = finish_args(p, p.parse_args())
     w, h = args.width, args.height
     torch.backends.cudnn.benchmark = True
     torch.cuda.set_stream(torch.cuda.Stream())  # TensorRT syncs extra on the legacy default stream
 
-    matter = None
-    if args.mode != "passthrough":
-        if args.backend == "trt":
-            from nvpoca.trt import TrtMatter
-
-            matter = TrtMatter(MODELS, args.variant, args.ratio, h, w)
-        else:
-            matter = Matter(args.variant, args.ratio, h, w)
-    smoother = gpu.AlphaSmoother() if args.smooth else None
-    bg = None
-    if args.mode == "replace":
-        img = decode_image(read_file(str(args.bg)), mode=ImageReadMode.RGB).cuda()
-        bg = gpu.cover(img[None].half() / 255, h, w)
-    sigma = args.blur * h / 1080
+    effect = Effect(args)
     out_buf = torch.empty(h, w * 2, dtype=torch.uint8, pin_memory=True)
 
     with Device(args.input) as cam, Device(args.output) as out:
-        cam.set_format(BufferType.VIDEO_CAPTURE, w, h, "MJPG")
-        cam.set_fps(BufferType.VIDEO_CAPTURE, args.fps)
-        if "exposure_dynamic_framerate" in cam.controls:
-            cam.controls.exposure_dynamic_framerate.value = False  # keep 30 fps in low light
-        fmt = cam.get_format(BufferType.VIDEO_CAPTURE)
-        if (fmt.width, fmt.height) != (w, h):
-            raise SystemExit(f"camera refused {w}x{h} MJPG, got {fmt.width}x{fmt.height}")
+        configure_camera(cam, w, h, args.fps)
         out.set_format(BufferType.VIDEO_OUTPUT, w, h, "YUYV")
         out.set_fps(BufferType.VIDEO_OUTPUT, args.fps)
         print(f"{args.input} {w}x{h} MJPG -> {args.output} YUYV | mode={args.mode} backend={args.backend} variant={args.variant} "
@@ -107,25 +43,16 @@ def main():
                 lap("capture", sync=False)
                 data = torch.frombuffer(bytearray(frame.data), dtype=torch.uint8)
                 try:
-                    img = decode_jpeg(data, device="cuda")  # nvJPEG; the JPEG upload happens inside
+                    src = decode(data)  # the JPEG upload happens inside
                 except RuntimeError as e:  # corrupt MJPEG frames happen on USB hiccups
                     print(f"skip frame: {e}", flush=True)
                     dropped += 1
                     t = time.perf_counter()
                     continue
-                src = img[None].half().div_(255)
                 lap("decode")
-
-                if matter:
-                    fgr, pha = matter(src)
-                    lap("infer")
-                    if smoother:
-                        pha = smoother(pha)
-                    back = bg if bg is not None else gpu.blurred_background(src, pha, sigma)
-                    res = gpu.composite(fgr, pha, back)
-                else:
-                    res = src
-                yuyv = gpu.to_yuyv(res)
+                fgr, pha = effect.matte(src)
+                lap("infer")
+                yuyv = gpu.to_yuyv(effect.compose(src, fgr, pha))
                 lap("compose")
                 out_buf.copy_(yuyv)
                 lap("download")

@@ -32,9 +32,10 @@ done
 ## Usage
 
 ```bash
-uv run python -m nvpoca                                  # blur, 1080p30, TensorRT, MobileNetV3
+uv run python -m nvpoca                                  # blur, 1080p30, TensorRT, ResNet50, ratio 0.4
+uv run python -m nvpoca --smooth                         # recommended: steadier edges (see Phase 2)
 uv run python -m nvpoca --mode replace --bg ~/bg.jpg
-uv run python -m nvpoca --variant resnet50 --smooth --blur 24
+uv run python -m nvpoca --variant mobilenetv3 --blur 24
 uv run python -m nvpoca --help
 ```
 
@@ -44,6 +45,19 @@ The first run per (variant, resolution, ratio) builds a TensorRT engine into `mo
 Every second a line with per-stage milliseconds is logged. `capture` is time spent waiting
 for the next camera frame (≈ idle), `decode` includes the JPEG upload, `latency` is from the
 camera's USB start-of-frame timestamp to the frame being written to the loopback device.
+
+## Comparing configs
+
+```bash
+uv run python -m nvpoca.compare clips/chair.mjpeg --record 10      # record a clip once
+uv run python -m nvpoca.compare clips/chair.mjpeg --alpha \
+  -c "" -c="--variant mobilenetv3" -c="--smooth"                  # labelled grid video + scores
+```
+
+Each `-c` is a set of normal `nvpoca` flags (write it as `-c="..."`). Output is a grid
+video next to the clip (`--alpha` shows the matte instead of the composite) and two scores
+(x1000, lower is better): `flicker` = alpha change where the camera image did not change,
+`lag` = how far smoothing trails the raw alpha where the image did change.
 
 ## Measurements
 
@@ -66,3 +80,20 @@ Steady-state means, ms:
 All configs hold 30 fps with no drops. Processing adds ~2–4 ms; the rest of `latency` is the
 USB transfer of the MJPEG frame (see passthrough). TensorRT vs torch on 60 real frames:
 mean |Δalpha| ≈ 5e-5.
+
+### Phase 2 (quality, clip: sitting in front of a dark office chair, 10 s)
+
+| Config | flicker | lag | infer ms (live) |
+|---|---|---|---|
+| MobileNetV3, ratio 0.25 (Phase 1 default) | 0.627 | – | 0.9 |
+| ResNet50, ratio 0.25 | 0.506 | – | 1.1 |
+| ResNet50, ratio 0.33 | 0.462 | – | |
+| ResNet50, ratio 0.4 (new default) | 0.442 | – | |
+| ResNet50, ratio 0.25, smooth 0.3 | 0.344 | 0.85 | |
+| ResNet50, ratio 0.4, smooth 0.3 | 0.303 | 0.76 | 2.3 |
+| ResNet50, ratio 0.4, smooth 0.5 | 0.327 | 0.65 | |
+| ResNet50, ratio 0.4, smooth 0.15 | 0.295 | 0.83 | |
+
+ResNet50 at 0.4 + `--smooth`: 1080p30, end-to-end latency ~15 ms. Below `--smooth 0.3`
+flicker barely improves while lag keeps growing. Remaining flicker sits on dark-on-dark
+edges (hair against the dark acoustic panel, shoulder against the dark shelf).
