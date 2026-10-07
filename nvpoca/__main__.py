@@ -1,5 +1,7 @@
-"""nvpoca daemon: keeps the virtual camera ready, opens the real camera only while an app
-reads it, and takes its settings over D-Bus (org.nvpoca.Daemon on the session bus)."""
+"""nvpoca supervisor: keeps the virtual camera ready, starts the GPU worker (nvpoca.worker)
+when an app reads it, stops the worker after --unload-after seconds without readers (frees
+the VRAM), and serves the settings over D-Bus (org.nvpoca.Daemon on the session bus).
+No torch/CUDA in this process, so it stays small while idle."""
 
 import asyncio
 import json
@@ -7,20 +9,16 @@ import os
 import select
 import signal
 import struct
+import sys
 import threading
-import time
-import traceback
-from collections import defaultdict, deque
 from pathlib import Path
 
-import torch
 from dbus_fast import BusType, DBusError, ErrorType, RequestNameReply
 from dbus_fast.aio import MessageBus
 from dbus_fast.service import PropertyAccess, ServiceInterface, dbus_property
-from linuxpy.video.device import BufferType, Device, VideoCapture
+from linuxpy.video.device import BufferType, Device
 
-from nvpoca import gpu
-from nvpoca.core import Effect, configure_camera, decode, finish_args, load_image, parser
+from nvpoca.common import finish_args, parser
 
 BUS_NAME = INTERFACE = "org.nvpoca.Daemon"
 OBJECT_PATH = "/org/nvpoca/Daemon"
@@ -28,37 +26,6 @@ CLIENT_USAGE = 0x08000000 + 0x08E00000 + 1  # v4l2loopback V4L2_EVENT_PRI_CLIENT
 SETTINGS = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "nvpoca" / "settings.json"
 # saved setting -> CLI flag that overrides it when given explicitly
 CLI_FLAG = {"enabled": "mode", "mode": "mode", "blur": "blur", "smooth": "smooth", "bg": "bg"}
-
-
-class State:
-    """Shared by the D-Bus side (asyncio, main thread) and the video thread. Only the video thread
-    touches the GPU pipeline; single attribute writes are atomic under the GIL."""
-
-    def __init__(self, settings: dict):
-        self.settings = settings
-        self.bg_image = load_image(Path(settings["bg"])) if settings["bg"] else None
-        self.dirty = threading.Event()
-        self.active = False
-        self.fps = 0.0
-        self.latency_ms = 0.0
-        self.notify = lambda *names: None  # replaced once the D-Bus side is up
-
-    def update(self, key: str, value) -> None:
-        self.settings[key] = value
-        SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS.write_text(json.dumps(self.settings, indent=2))
-        self.dirty.set()
-
-    def apply(self, effect: Effect) -> None:
-        if not self.dirty.is_set():
-            return
-        self.dirty.clear()
-        s = self.settings
-        effect.mode = s["mode"] if s["enabled"] else "passthrough"
-        effect.set_blur(s["blur"])
-        if (effect.smoother.min_rate if effect.smoother else 0) != s["smooth"]:
-            effect.set_smooth(s["smooth"] or None)
-        effect.set_background(self.bg_image)
 
 
 def load_settings(args, explicit: set[str]) -> dict:
@@ -79,105 +46,102 @@ def load_settings(args, explicit: set[str]) -> dict:
     return settings
 
 
-def pending_readers(out: Device, poll: select.poll, timeout_ms: int | None) -> int | None:
-    """Latest v4l2loopback reader count (0/1) if an event arrived, else None."""
-    count = None
-    while poll.poll(timeout_ms):
-        count = struct.unpack_from("I", bytes(out.deque_event().u))[0]
-        timeout_ms = 0
-    return count
+def watch_readers(out: Device, on_change) -> None:
+    """Thread: v4l2loopback reports 1 when an app starts streaming, 0 when it stops or dies."""
+    out.subscribe_event(CLIENT_USAGE)
+    poll = select.poll()
+    poll.register(out.fileno(), select.POLLPRI)
+    while True:
+        poll.poll()
+        on_change(struct.unpack_from("I", bytes(out.deque_event().u))[0])
 
 
-def video(args, state: State, recent: deque | None) -> None:
-    w, h = args.width, args.height
-    torch.backends.cudnn.benchmark = True
-    torch.cuda.set_stream(torch.cuda.Stream())  # TensorRT syncs extra on the legacy default stream
-    effect = Effect(args)
-    state.dirty.set()
-    out_buf = torch.empty(h, w * 2, dtype=torch.uint8, pin_memory=True)
-    black = torch.tensor([16, 128], dtype=torch.uint8).repeat(h, w).numpy()
+class Supervisor:
+    def __init__(self, args, worker_argv: list[str], settings: dict, out: Device, black: bytes):
+        self.args, self.worker_argv, self.settings = args, worker_argv, settings
+        self.out, self.out_fd, self.black = out, out.fileno(), black
+        self.worker = None
+        self.spawning = False
+        self.unload = None
+        self.readers = 0
+        self.loaded = self.active = False
+        self.fps = self.latency = 0.0
+        self.changed = lambda *names: None  # replaced once the D-Bus object exists
 
-    with Device(args.output) as out:
-        out.set_format(BufferType.VIDEO_OUTPUT, w, h, "YUYV")
-        out.set_fps(BufferType.VIDEO_OUTPUT, args.fps)
-        # a frame up front so a reader that starts before the camera is up gets an image at once
-        out.write(black)
-        out.subscribe_event(CLIENT_USAGE)
-        poll = select.poll()
-        poll.register(out.fileno(), select.POLLPRI)
-        print(f"ready: {args.output} {w}x{h} YUYV, camera {args.input} opens on demand", flush=True)
+    def update(self, key: str, value) -> None:
+        self.settings[key] = value
+        SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text(json.dumps(self.settings, indent=2))
+        self.send(settings=self.settings)
 
-        while True:
-            if pending_readers(out, poll, None) != 1:
-                continue
-            state.active = True
-            state.notify("Active")
-            try:
-                stream(args, state, effect, out, out_buf, poll, recent)
-            finally:
-                state.active, state.fps, state.latency_ms = False, 0.0, 0.0
-                effect.reset()
-                out.write(black)
-                state.notify("Active", "Fps", "Latency")
-            print("reader gone, camera closed", flush=True)
+    def send(self, **msg) -> None:
+        if self.worker:
+            self.worker.stdin.write((json.dumps(msg) + "\n").encode())
 
+    async def on_readers(self, count: int) -> None:
+        self.readers = count
+        if count and not self.worker and not self.spawning:
+            await self.start_worker()
+        self.sync()
 
-def stream(args, state: State, effect: Effect, out: Device, out_buf: torch.Tensor, poll, recent) -> None:
-    with Device(args.input) as cam:
-        configure_camera(cam, args.width, args.height, args.fps)
-        print(f"reader attached, camera {args.input} open", flush=True)
-        stats, frames, dropped = defaultdict(float), 0, 0
-        report_at = time.monotonic() + 1
-        with VideoCapture(cam, size=2) as capture:
-            t = time.perf_counter()
-            for frame in capture:
-                stage = {}
+    def sync(self) -> None:
+        """Bring the worker in line with the reader count; idempotent, so event order doesn't matter."""
+        if not self.worker:
+            return
+        self.send(stream=bool(self.readers))
+        if self.readers and self.unload:
+            self.unload.cancel()
+            self.unload = None
+        elif not self.readers and not self.unload:
+            self.unload = asyncio.get_running_loop().call_later(self.args.unload_after, self.stop_worker)
 
-                def lap(name, sync=True):
-                    nonlocal t
-                    if sync:
-                        torch.cuda.synchronize()
-                    now = time.perf_counter()
-                    stage[name] = now - t
-                    t = now
+    async def start_worker(self) -> None:
+        self.spawning = True
+        try:
+            self.worker = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "nvpoca.worker", *self.worker_argv, "--out-fd", str(self.out_fd),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, pass_fds=(self.out_fd,),
+            )
+        finally:
+            self.spawning = False
+        print(f"worker {self.worker.pid} started", flush=True)
+        self.loaded = True
+        self.changed("Loaded")
+        self.send(settings=self.settings)
+        asyncio.create_task(self.follow(self.worker))
 
-                lap("capture", sync=False)
-                state.apply(effect)
-                raw = frame.data
-                if recent is not None:
-                    recent.append(raw)
-                try:
-                    src = decode(torch.frombuffer(bytearray(raw), dtype=torch.uint8))  # JPEG upload happens inside
-                except RuntimeError as e:  # corrupt MJPEG frames happen on USB hiccups
-                    print(f"skip frame: {e}", flush=True)
-                    dropped += 1
-                    t = time.perf_counter()
-                    continue
-                lap("decode")
-                fgr, pha, _ = effect.matte(src)
-                lap("infer")
-                yuyv = gpu.to_yuyv(effect.compose(src, fgr, pha))
-                lap("compose")
-                out_buf.copy_(yuyv)
-                lap("download")
-                out.write(out_buf.numpy())
-                lap("write", sync=False)
-                # frame timestamp is CLOCK_MONOTONIC at USB start-of-frame -> true capture-to-output latency
-                stage["latency"] = time.clock_gettime(time.CLOCK_MONOTONIC) - frame.timestamp
+    def stop_worker(self) -> None:
+        self.unload = None
+        if self.worker:
+            print(f"no reader for {self.args.unload_after:g} s, stopping worker {self.worker.pid}", flush=True)
+            self.worker.stdin.close()  # EOF = quit; follow() notices the exit
+            self.worker = None
 
-                for k, v in stage.items():
-                    stats[k] += v
-                frames += 1
-                if time.monotonic() >= report_at:
-                    report_at += 1
-                    state.fps, state.latency_ms = frames, stats["latency"] / frames * 1000
-                    state.notify("Fps", "Latency")
-                    line = " ".join(f"{k}={v / frames * 1000:.1f}" for k, v in stats.items())
-                    print(f"fps={frames:2d} drop={dropped} ms: {line}", flush=True)
-                    stats.clear()
-                    frames = dropped = 0
-                if pending_readers(out, poll, 0) == 0:
-                    return
+    async def follow(self, proc) -> None:
+        async for line in proc.stdout:
+            msg = json.loads(line)
+            if "active" in msg:
+                self.active = msg["active"]
+                self.fps = self.latency = 0.0
+                self.changed("Active", "Fps", "Latency")
+            if "fps" in msg:
+                self.fps, self.latency = float(msg["fps"]), float(msg["latency"])
+                self.changed("Fps", "Latency")
+        rc = await proc.wait()
+        print(f"worker {proc.pid} exited ({rc})", flush=True)
+        if self.worker is proc:  # crashed rather than stopped by us
+            self.worker = None
+            if self.unload:
+                self.unload.cancel()
+                self.unload = None
+        if not self.worker:
+            os.write(self.out_fd, self.black)  # don't leave a reader on the last processed frame
+            self.loaded = self.active = False
+            self.fps = self.latency = 0.0
+            self.changed("Loaded", "Active", "Fps", "Latency")
+        if rc != 0 and self.readers:
+            await asyncio.sleep(2)
+            await self.on_readers(self.readers)
 
 
 def invalid(msg: str) -> DBusError:
@@ -185,87 +149,97 @@ def invalid(msg: str) -> DBusError:
 
 
 class Daemon(ServiceInterface):
-    def __init__(self, state: State):
+    def __init__(self, sup: Supervisor):
         super().__init__(INTERFACE)
-        self.state = state
+        self.sup = sup
 
     def changed(self, *names: str) -> None:
         self.emit_properties_changed({n: getattr(self, n) for n in names})
 
     @dbus_property()
     def Enabled(self) -> "b":
-        return self.state.settings["enabled"]
+        return self.sup.settings["enabled"]
 
     @Enabled.setter
     def Enabled(self, value: "b"):
-        self.state.update("enabled", value)
+        self.sup.update("enabled", value)
 
     @dbus_property()
     def Mode(self) -> "s":
-        return self.state.settings["mode"]
+        return self.sup.settings["mode"]
 
     @Mode.setter
     def Mode(self, value: "s"):
         if value not in ("blur", "replace"):
             raise invalid("Mode must be 'blur' or 'replace'")
-        self.state.update("mode", value)
+        self.sup.update("mode", value)
 
     @dbus_property()
     def Blur(self) -> "d":
-        return self.state.settings["blur"]
+        return self.sup.settings["blur"]
 
     @Blur.setter
     def Blur(self, value: "d"):
         if not 0.5 <= value <= 40:
             raise invalid("Blur must be within 0.5..40")
-        self.state.update("blur", value)
+        self.sup.update("blur", value)
 
     @dbus_property()
     def Smooth(self) -> "d":
-        return self.state.settings["smooth"]
+        return self.sup.settings["smooth"]
 
     @Smooth.setter
     def Smooth(self, value: "d"):
         if not 0 <= value <= 1:
             raise invalid("Smooth must be within 0..1 (0 = off)")
-        self.state.update("smooth", value)
+        self.sup.update("smooth", value)
 
     @dbus_property()
     def Background(self) -> "s":
-        return self.state.settings["bg"]
+        return self.sup.settings["bg"]
 
     @Background.setter
     def Background(self, value: "s"):
         path = Path(value).expanduser() if value else None
-        try:
-            self.state.bg_image = load_image(path) if path else None
-        except (OSError, RuntimeError) as e:
-            raise invalid(f"cannot load background image: {e}") from e
-        self.state.update("bg", str(path or ""))
+        if path and not path.is_file():  # decoding happens in the worker, which falls back to blur
+            raise invalid(f"no such file: {path}")
+        self.sup.update("bg", str(path or ""))
 
     @dbus_property(access=PropertyAccess.READ)
     def Active(self) -> "b":
         """The real camera is open because an app reads the virtual one."""
-        return self.state.active
+        return self.sup.active
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Loaded(self) -> "b":
+        """The GPU worker is running (models in VRAM)."""
+        return self.sup.loaded
 
     @dbus_property(access=PropertyAccess.READ)
     def Fps(self) -> "d":
-        return float(self.state.fps)
+        return self.sup.fps
 
     @dbus_property(access=PropertyAccess.READ)
     def Latency(self) -> "d":
         """Capture-to-output latency in ms."""
-        return float(self.state.latency_ms)
+        return self.sup.latency
 
 
-async def serve(state: State) -> None:
+async def serve(sup: Supervisor) -> None:
     bus = await MessageBus(bus_type=BusType.SESSION).connect()
-    daemon = Daemon(state)
+    daemon = Daemon(sup)
     bus.export(OBJECT_PATH, daemon)
     if await bus.request_name(BUS_NAME) != RequestNameReply.PRIMARY_OWNER:
         raise SystemExit(f"{BUS_NAME} is already taken: is another nvpoca running?")
+    sup.changed = daemon.changed
     loop = asyncio.get_running_loop()
-    state.notify = lambda *names: loop.call_soon_threadsafe(daemon.changed, *names)
+    threading.Thread(
+        target=watch_readers,
+        args=(sup.out, lambda n: loop.call_soon_threadsafe(asyncio.ensure_future, sup.on_readers(n))),
+        daemon=True, name="readers",
+    ).start()
+    print(f"ready: {sup.args.output} {sup.args.width}x{sup.args.height} YUYV; "
+          f"GPU worker starts with the first reader, stops {sup.args.unload_after:g} s after the last", flush=True)
     await bus.wait_for_disconnect()
 
 
@@ -278,29 +252,20 @@ def main():
     args = finish_args(p, p.parse_args())
     defaults = p.parse_args([])
     explicit = {k for k in set(CLI_FLAG.values()) if getattr(args, k) != getattr(defaults, k)}
-    state = State(load_settings(args, explicit))
-    if args.mode == "passthrough":
-        args.mode = "blur"  # keep the model loaded so the effect can be switched on later
-    recent = deque(maxlen=10 * args.fps) if args.record else None
-
-    def run_video():
-        try:
-            video(args, state, recent)
-        except BaseException:
-            traceback.print_exc()
-            os._exit(1)  # without the video thread the daemon is useless; let systemd restart it
-
+    settings = load_settings(args, explicit)
     signal.signal(signal.SIGTERM, on_sigterm)
-    threading.Thread(target=run_video, daemon=True, name="video").start()
-    try:
-        asyncio.run(serve(state))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if recent:
-            args.record.parent.mkdir(parents=True, exist_ok=True)
-            args.record.write_bytes(b"".join(recent))  # same format as compare --record
-            print(f"wrote last {len(recent)} frames to {args.record}", flush=True)
+
+    w, h = args.width, args.height
+    black = bytes([16, 128]) * (w * h)  # YUYV black
+    with Device(args.output) as out:
+        out.set_format(BufferType.VIDEO_OUTPUT, w, h, "YUYV")
+        out.set_fps(BufferType.VIDEO_OUTPUT, args.fps)
+        os.write(out.fileno(), black)  # a frame up front so a new reader gets an image while the worker loads
+        sup = Supervisor(args, sys.argv[1:], settings, out, black)
+        try:
+            asyncio.run(serve(sup))
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

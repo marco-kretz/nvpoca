@@ -24,7 +24,8 @@ import torch
 import torch.nn.functional as F
 from linuxpy.video.device import Device, VideoCapture
 
-from nvpoca.core import Effect, configure_camera, decode, finish_args, parser
+from nvpoca.common import configure_camera, finish_args, parser
+from nvpoca.core import Effect, decode
 
 SOI, EOI = b"\xff\xd8", b"\xff\xd9"
 

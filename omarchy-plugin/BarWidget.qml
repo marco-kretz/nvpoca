@@ -24,7 +24,7 @@ Panel {
 
   readonly property string statusText: !running ? "Daemon not running"
     : active ? (previewing ? "Preview" : "In use") + " · " + Math.round(props.Fps || 0) + " fps · " + (props.Latency || 0).toFixed(0) + " ms"
-    : "Idle, camera off"
+    : props.Loaded ? "Idle, camera off · models in VRAM" : "Idle, camera off · VRAM free"
 
   function refresh() { if (!getAll.running) getAll.running = true }
 

@@ -35,9 +35,13 @@ curl -L -o models/depth_anything_v2_vits.pth \
 
 ## Usage
 
-`python -m nvpoca` is a daemon: it keeps `/dev/video10` ready and opens the real camera only
-while an app (browser, Zoom, the preview) reads the virtual one. Settings live in
-`~/.config/nvpoca/settings.json` and can be changed at runtime over D-Bus.
+`python -m nvpoca` is a small supervisor (no torch/CUDA, ~20 MB RAM): it keeps `/dev/video10`
+ready and, when an app (browser, Zoom, the preview) starts reading it, launches the GPU worker
+(`nvpoca.worker`), which loads the models and opens the real camera. `--unload-after` seconds
+(default 60) after the last reader the worker exits, which frees all of its VRAM; a CUDA
+context only goes away with its process. Cold start to the first camera frame ~1.6 s (the app
+sees black meanwhile), warm ~0.3 s. Settings live in `~/.config/nvpoca/settings.json` and can
+be changed at runtime over D-Bus.
 
 ```bash
 # run as a systemd user service (unit file in contrib/, linked from the repo)
@@ -66,7 +70,8 @@ $B set-property $O Background s ~/Pictures/bg.jpg  # needed for replace
 $B set-property $O Smooth d 0                      # 0 = off, else min rate (0.15 default)
 ```
 
-Read-only: `Active`, `Fps`, `Latency` (ms). Changes emit `PropertiesChanged`.
+Read-only: `Active` (camera open), `Loaded` (GPU worker running), `Fps`, `Latency` (ms).
+Changes emit `PropertiesChanged`.
 
 ### Omarchy shell plugin
 
@@ -211,4 +216,6 @@ the SMs), latency ~12 ms.
 Kept Python instead of a Rust rewrite: the GPU work is ~3.5 ms per frame either way; Rust
 would mainly save RAM and start-up time. Reader detection uses v4l2loopback's
 `V4L2_EVENT_PRI_CLIENT_USAGE` (0x10E00001), which fires on STREAMON/STREAMOFF and also when a
-reader is killed. Idle (camera closed, models loaded): ~530 MB RAM, ~630 MB VRAM, no CPU.
+reader is killed. Idle: supervisor only, ~20 MB RAM, no VRAM. While loaded: the worker adds
+~630 MB VRAM; it inherits the supervisor's loopback fd and talks JSON lines over stdin/stdout.
+A crashed worker is restarted while an app is still reading.
