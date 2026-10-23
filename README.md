@@ -64,7 +64,8 @@ uv run python -m nvpoca --keep-chair               # experimental: keep the chai
 ```
 
 The first start per (variant, resolution, ratio) builds a TensorRT engine into `models/`
-(~20–40 s). `--backend torch` skips TensorRT.
+(~20–40 s), again after a TensorRT upgrade (engines only load in the version that built them, so
+their names carry it; engines of older versions can be deleted). `--backend torch` skips TensorRT.
 
 ### D-Bus (`org.nvpoca.Daemon`, session bus)
 
@@ -235,7 +236,7 @@ RVM shrinks the 1080p frame to 480×270 with plain bilinear, which at ratio 0.25
 2×2 of every 4×4 pixels: sensor noise and MJPEG blocks alias into the model input and show
 up as edge flicker. A triangle low-pass first (what `F.interpolate(antialias=True)` does;
 TensorRT has no antialiased Resize, so it runs as two small convolutions in the engine)
-fixes that. Engines are cached as `*_aa.engine`; old ones can be deleted.
+fixes that. Engines are cached as `*_aa_trt<version>.engine`; old ones can be deleted.
 
 | MobileNetV3 0.25 `--smooth` (flicker / lag / soft) | chair | chair2 | brille |
 |---|---|---|---|

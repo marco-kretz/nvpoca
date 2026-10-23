@@ -146,9 +146,9 @@ class SamMatter:
         self.reset()
 
     def _engine(self, models: Path, part: str, module: nn.Module, args: dict, outputs: list[str], dtype):
-        from nvpoca.trt import Engine, build
+        from nvpoca.trt import Engine, build, engine_path
 
-        path = models / f"sam2matting_tiny_{part}.engine"
+        path = engine_path(models, f"sam2matting_tiny_{part}")
         if not path.exists():
             print(f"building {path.name} (one-time, takes a minute)...", flush=True)
             typed = {k: v.to(dtype) for k, v in args.items()}

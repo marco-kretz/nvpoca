@@ -12,6 +12,11 @@ from nvpoca.rvm.model import MattingNetwork
 LOGGER = trt.Logger(trt.Logger.WARNING)
 
 
+def engine_path(models: Path, name: str) -> Path:
+    # an engine only deserializes in the TensorRT version that built it; after an upgrade, build anew
+    return models / f"{name}_trt{trt.__version__}.engine"
+
+
 class _Fixed(nn.Module):
     # TensorRT wants static shapes, so downsample_ratio is baked in and rec states are plain inputs
     def __init__(self, model: MattingNetwork, ratio: float):
@@ -54,11 +59,11 @@ class TrtMatter:
     """Same interface as the torch Matter: call with (1, 3, H, W) half src, get (fgr, pha)."""
 
     def __init__(self, models: Path, variant: str, ratio: float, h: int, w: int):
-        engine_path = models / f"rvm_{variant}_{w}x{h}_r{ratio:.3f}_aa.engine"
-        if not engine_path.exists():
-            print(f"building {engine_path.name} (one-time, takes a minute)...", flush=True)
-            _build(models / f"rvm_{variant}.pth", variant, ratio, h, w, engine_path)
-        self.engine = trt.Runtime(LOGGER).deserialize_cuda_engine(engine_path.read_bytes())
+        path = engine_path(models, f"rvm_{variant}_{w}x{h}_r{ratio:.3f}_aa")
+        if not path.exists():
+            print(f"building {path.name} (one-time, takes a minute)...", flush=True)
+            _build(models / f"rvm_{variant}.pth", variant, ratio, h, w, path)
+        self.engine = trt.Runtime(LOGGER).deserialize_cuda_engine(path.read_bytes())
         self.ctx = self.engine.create_execution_context()
         self.stream = torch.cuda.current_stream()
 
