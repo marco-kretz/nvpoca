@@ -185,20 +185,6 @@ Panel {
               onToggled: root.set("Smooth", "d", checked ? 0 : 0.15)
             }
           }
-
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
-
-            InfoText { id: qualityLabel; text: "High quality"; opacity: 0.6; anchors.verticalCenter: parent.verticalCenter }
-            Item { width: parent.width - qualityLabel.implicitWidth - qualitySwitch.width - parent.spacing * 2; height: 1 }
-            ToggleSwitch {
-              id: qualitySwitch
-              checked: !!root.props.Quality
-              foreground: root.bar.foreground
-              onToggled: root.set("Quality", "b", !checked)
-            }
-          }
         }
 
         PanelSeparator { foreground: root.bar.foreground }

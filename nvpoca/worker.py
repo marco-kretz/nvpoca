@@ -80,9 +80,6 @@ class Control:
             self.dirty, s = False, self.settings
         effect.mode = s["mode"] if s["enabled"] else "passthrough"
         effect.set_blur(s["blur"])
-        if s["quality"] != bool(effect.sam):
-            log(f"quality {'on, loading SAM2Matting' if s['quality'] else 'off'}")
-            effect.set_quality(s["quality"])
         if (effect.smoother.min_rate if effect.smoother else 0) != s["smooth"]:
             effect.set_smooth(s["smooth"] or None)
         if s["bg"] != self.bg_path:

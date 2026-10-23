@@ -5,4 +5,3 @@ models/
 *.onnx
 clips/
 .claude/
-nvpoca/sam2m/
