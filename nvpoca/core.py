@@ -133,6 +133,9 @@ class Effect:
             fgr, pha = self.add_near(src, fgr, pha)
         raw = pha
         if self.smoother:
+            # RVM's foreground colour is undefined where it sees background (~84/255 off the camera image
+            # on the clips); alpha the smoother holds there must show camera pixels instead
+            fgr = torch.lerp(src, fgr, (raw / 0.05).clamp(max=1))
             pha = self.smoother(pha, src)
         return fgr, pha, raw
 
