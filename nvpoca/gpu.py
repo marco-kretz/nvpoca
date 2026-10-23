@@ -152,6 +152,13 @@ if __name__ == "__main__":
     out = guided_filter(lr, lr, hr)
     assert out[0, 0, 30, 5] < 0.1 and out[0, 0, 36, 5] > 0.9 and out[0, 0, 63, 5] > 0.99, out[0, 0, :, 5]
 
+    # RVM's TensorRT-friendly prefilter + bilinear matches torch's antialiased resize (away from the border)
+    from nvpoca.rvm.model import _prefilter
+    x = torch.rand(1, 3, 64, 96, device=dev)
+    ours = F.interpolate(_prefilter(x, 0.25), scale_factor=0.25, mode="bilinear")
+    ref = F.interpolate(x, scale_factor=0.25, mode="bilinear", antialias=True)
+    assert (ours - ref)[..., 1:-1, 1:-1].abs().max() < 1e-4, (ours - ref).abs().max()
+
     s = AlphaSmoother()
     a = torch.zeros(1, 1, 16, 16, device=dev)
     img = torch.zeros(1, 3, 16, 16, device=dev)

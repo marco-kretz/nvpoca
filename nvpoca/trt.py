@@ -1,4 +1,5 @@
-"""RVM as a TensorRT FP16 engine, built once per (variant, resolution, ratio) and cached."""
+"""TensorRT engines, built once from a torch module and cached: RVM (FP16, per variant, resolution and
+ratio) and the fixed-shape parts of SAM2Matting (nvpoca.sam)."""
 
 from pathlib import Path
 
@@ -28,13 +29,15 @@ def _build(weights: Path, variant: str, ratio: float, h: int, w: int, engine: Pa
     src = torch.zeros(1, 3, h, w, device="cuda", dtype=torch.half)
     with torch.inference_mode():
         _, _, *rec = model.model(src, downsample_ratio=ratio)  # discover rec shapes
+    build(model, (src, *[torch.zeros_like(r) for r in rec]),
+          ["src", "r1i", "r2i", "r3i", "r4i"], ["fgr", "pha", "r1o", "r2o", "r3o", "r4o"], engine)
+
+
+def build(module: nn.Module, args: tuple, input_names: list[str], output_names: list[str], engine: Path) -> None:
+    """Export to ONNX and build a strongly typed engine: precision follows the module's and args' dtypes."""
     onnx = engine.with_suffix(".onnx")
-    torch.onnx.export(
-        model, (src, *[torch.zeros_like(r) for r in rec]), onnx,
-        input_names=["src", "r1i", "r2i", "r3i", "r4i"],
-        output_names=["fgr", "pha", "r1o", "r2o", "r3o", "r4o"],
-        dynamo=True, external_data=False,
-    )
+    torch.onnx.export(module, args, onnx, input_names=input_names, output_names=output_names,
+                      dynamo=True, external_data=False)
     builder = trt.Builder(LOGGER)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     parser = trt.OnnxParser(network, LOGGER)
@@ -51,7 +54,7 @@ class TrtMatter:
     """Same interface as the torch Matter: call with (1, 3, H, W) half src, get (fgr, pha)."""
 
     def __init__(self, models: Path, variant: str, ratio: float, h: int, w: int):
-        engine_path = models / f"rvm_{variant}_{w}x{h}_r{ratio:.3f}.engine"
+        engine_path = models / f"rvm_{variant}_{w}x{h}_r{ratio:.3f}_aa.engine"
         if not engine_path.exists():
             print(f"building {engine_path.name} (one-time, takes a minute)...", flush=True)
             _build(models / f"rvm_{variant}.pth", variant, ratio, h, w, engine_path)
@@ -83,3 +86,31 @@ class TrtMatter:
             raise RuntimeError("TensorRT execution failed")
         self.rec_in, self.rec_out = self.rec_out, self.rec_in
         return self.fgr, self.pha
+
+
+DTYPES = {trt.DataType.HALF: torch.half, trt.DataType.BF16: torch.bfloat16, trt.DataType.FLOAT: torch.float}
+
+
+class Engine:
+    """A cached fixed-shape engine with its own I/O buffers: engine(**inputs) -> outputs in output order.
+    Outputs are reused by the next call."""
+
+    def __init__(self, path: Path):
+        self.engine = trt.Runtime(LOGGER).deserialize_cuda_engine(path.read_bytes())
+        self.ctx = self.engine.create_execution_context()
+        self.buf, self.outputs = {}, []
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            t = torch.empty(tuple(self.engine.get_tensor_shape(name)), device="cuda",
+                            dtype=DTYPES[self.engine.get_tensor_dtype(name)])
+            self.ctx.set_tensor_address(name, t.data_ptr())
+            self.buf[name] = t
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
+                self.outputs.append(t)
+
+    def __call__(self, **inputs: torch.Tensor) -> list[torch.Tensor]:
+        for name, t in inputs.items():
+            self.buf[name].copy_(t)
+        if not self.ctx.execute_async_v3(torch.cuda.current_stream().cuda_stream):
+            raise RuntimeError("TensorRT execution failed")
+        return self.outputs

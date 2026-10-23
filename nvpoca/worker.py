@@ -11,8 +11,14 @@ import time
 
 STARTED = time.monotonic()  # before the heavy imports, so "ready in" covers torch/TensorRT loading
 
-import json
 import os
+
+# TensorRT and friends log to fd 1: the protocol gets its own copy, fd 1 goes to stderr (journal)
+PROTO = os.fdopen(os.dup(1), "w")
+os.dup2(2, 1)
+
+import errno
+import json
 import signal
 import sys
 import threading
@@ -28,10 +34,11 @@ from nvpoca.core import Effect, decode, load_image
 
 
 def send(**msg) -> None:
+    global PROTO
     try:
-        print(json.dumps(msg), flush=True)
+        print(json.dumps(msg), file=PROTO, flush=True)
     except BrokenPipeError:  # supervisor already gone (shutdown); stdin EOF stops us right after
-        sys.stdout = open(os.devnull, "w")
+        PROTO = open(os.devnull, "w")
 
 
 def log(msg: str) -> None:
@@ -73,6 +80,9 @@ class Control:
             self.dirty, s = False, self.settings
         effect.mode = s["mode"] if s["enabled"] else "passthrough"
         effect.set_blur(s["blur"])
+        if s["quality"] != bool(effect.sam):
+            log(f"quality {'on, loading SAM2Matting' if s['quality'] else 'off'}")
+            effect.set_quality(s["quality"])
         if (effect.smoother.min_rate if effect.smoother else 0) != s["smooth"]:
             effect.set_smooth(s["smooth"] or None)
         if s["bg"] != self.bg_path:
@@ -177,6 +187,12 @@ def main():
             send(active=True)
             try:
                 stream(args, ctl, effect, out_buf, recent)
+            except OSError as e:
+                if e.errno != errno.EBUSY:
+                    raise
+                # e.g. the browser still holds the real camera while switching to ours; readers get black meanwhile
+                log(f"{args.input} busy (another app has it open), retrying")
+                time.sleep(1)
             finally:
                 effect.reset()
                 write_frame(args.out_fd, black)

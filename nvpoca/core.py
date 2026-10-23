@@ -82,10 +82,23 @@ class Effect:
             else:
                 self.matter = Matter(args.variant, args.ratio, self.h, self.w)
         self.depth = Depth() if args.keep_chair and self.matter else None
+        self.backend, self.sam = args.backend, None
+        self.set_quality(args.quality)
         self.mode = args.mode
+        # pure #00FF00 is the default key colour of OBS's chroma key filter
+        self.green = torch.tensor([0.0, 1.0, 0.0], device="cuda", dtype=torch.half).view(1, 3, 1, 1)
         self.set_smooth(args.smooth)
         self.set_blur(args.blur)
         self.set_background(load_image(args.bg) if args.bg else None)
+
+    def set_quality(self, on: bool) -> None:
+        """SAM2Matting on top of RVM; loaded on first use (a few seconds, engines are built once)."""
+        if on and self.matter and not self.sam:
+            from nvpoca.sam import SamMatter
+
+            self.sam = SamMatter(MODELS, self.backend)
+        elif not on:
+            self.sam = None
 
     def set_smooth(self, min_rate: float | None) -> None:
         self.smoother = gpu.AlphaSmoother(min_rate) if min_rate else None
@@ -101,6 +114,8 @@ class Effect:
         """Forget temporal state, e.g. when the camera restarts."""
         if self.matter:
             self.matter.reset()
+        if self.sam:
+            self.sam.reset()
         if self.smoother:
             self.smoother.prev = None
 
@@ -110,6 +125,10 @@ class Effect:
             one = torch.ones_like(src[:, :1])
             return src, one, one
         fgr, pha = self.matter(src)
+        if self.sam:
+            # RVM's foreground colour is only meaningful where RVM sees the person; camera pixels elsewhere
+            fgr = torch.lerp(src, fgr, pha)
+            pha = self.sam(src, pha)
         if self.depth:
             fgr, pha = self.add_near(src, fgr, pha)
         raw = pha
@@ -135,8 +154,11 @@ class Effect:
     def compose(self, src: torch.Tensor, fgr: torch.Tensor, pha: torch.Tensor) -> torch.Tensor:
         if not self.matter or self.mode == "passthrough":
             return src
-        if self.mode == "replace" and self.bg is not None:
-            back = self.bg
+        if self.mode == "green" or (self.mode == "replace" and self.bg is not None):
+            back = self.green if self.mode == "green" else self.bg
+            # a flat or new background shows every half-transparent edge pixel as a halo or smear: hard
+            # edges, as a keyer would cut them (blur keeps the soft matte, its background hides the halo)
+            pha = ((pha - 0.4) / 0.2).clamp(0, 1)
         else:
             back = gpu.blurred_background(src, pha, self.sigma)
         return gpu.composite(fgr, pha, back)

@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import Tensor
 from torch import nn
@@ -68,6 +69,7 @@ class MattingNetwork(nn.Module):
             return [seg, *rec]
 
     def _interpolate(self, x: Tensor, scale_factor: float):
+        x = _prefilter(x, scale_factor)  # nvpoca
         if x.ndim == 5:
             B, T = x.shape[:2]
             x = F.interpolate(x.flatten(0, 1), scale_factor=scale_factor,
@@ -77,3 +79,19 @@ class MattingNetwork(nn.Module):
             x = F.interpolate(x, scale_factor=scale_factor,
                 mode='bilinear', align_corners=False, recompute_scale_factor=False)
         return x
+
+
+def _prefilter(x: Tensor, scale_factor: float) -> Tensor:
+    """nvpoca: triangle low-pass before bilinear downsampling, i.e. F.interpolate(antialias=True),
+    which TensorRT can't run. Plain bilinear at 0.25 samples 2x2 of every 4x4 pixels, so sensor
+    noise and MJPEG blocks alias into the model input (alpha flicker, README Phase 4)."""
+    s = 1 / scale_factor
+    if s <= 1:
+        return x
+    r = math.ceil(s) - 1
+    w = 1 - torch.arange(-r, r + 1, device=x.device, dtype=x.dtype).abs() / s
+    w = w / w.sum()
+    y = x.reshape(-1, 1, *x.shape[-2:])
+    y = F.conv2d(F.pad(y, (r, r, 0, 0), mode='replicate'), w.view(1, 1, 1, -1))
+    y = F.conv2d(F.pad(y, (0, 0, r, r), mode='replicate'), w.view(1, 1, -1, 1))
+    return y.reshape(x.shape)

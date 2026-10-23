@@ -143,10 +143,10 @@ Panel {
           spacing: Style.spacing.labelGap
           visible: root.running && root.enabled
 
-          // Replace only makes sense once a background image is set (busctl ... Background s <path>).
+          // Image only makes sense once a background is set (busctl ... Background s <path>).
           ButtonGroup {
-            visible: !!root.props.Background
-            options: [{ value: "blur", label: "Blur" }, { value: "replace", label: "Image" }]
+            options: [{ value: "blur", label: "Blur" }, { value: "green", label: "Green" }]
+              .concat(root.props.Background ? [{ value: "replace", label: "Image" }] : [])
             value: root.props.Mode || "blur"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
@@ -185,6 +185,20 @@ Panel {
               onToggled: root.set("Smooth", "d", checked ? 0 : 0.15)
             }
           }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            InfoText { id: qualityLabel; text: "High quality"; opacity: 0.6; anchors.verticalCenter: parent.verticalCenter }
+            Item { width: parent.width - qualityLabel.implicitWidth - qualitySwitch.width - parent.spacing * 2; height: 1 }
+            ToggleSwitch {
+              id: qualitySwitch
+              checked: !!root.props.Quality
+              foreground: root.bar.foreground
+              onToggled: root.set("Quality", "b", !checked)
+            }
+          }
         }
 
         PanelSeparator { foreground: root.bar.foreground }
@@ -198,7 +212,8 @@ Panel {
           tooltipText: root.canPreview ? "" : (root.running ? "An app is using the camera" : "Start the nvpoca daemon first")
           foreground: root.bar.foreground
           fontFamily: root.bar.fontFamily
-          onClicked: preview.running = !preview.running
+          // SIGKILL: mpv's demuxer can sit in a blocking v4l2 read and then ignores SIGTERM
+          onClicked: if (root.previewing) preview.signal(9); else preview.running = true
         }
       }
     }
