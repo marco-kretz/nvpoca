@@ -16,6 +16,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--smooth", type=float, nargs="?", const=0.15, default=0.15, metavar="MIN_RATE",
                    help="damp alpha flicker where the image is static; MIN_RATE in (0, 1], lower = steadier (default 0.15)")
     p.add_argument("--no-smooth", dest="smooth", action="store_const", const=None, help="raw RVM alpha, for comparison")
+    p.add_argument("--light", type=float, nargs="?", const=0.5, metavar="STRENGTH",
+                   help="virtual frontal key light when you are underexposed or backlit; STRENGTH in (0, 1] "
+                        "caps the gain at 1 + 2 * STRENGTH (default 0.5)")
     p.add_argument("--keep-chair", action="store_true", help="keep what sits at your depth (chair) via a depth model")
     p.add_argument("--blur", type=float, default=4, help="blur sigma in output pixels at 1080p (subtle 4, portrait ~5-10, heavy 16+)")
     p.add_argument("--record", type=Path, metavar="CLIP", help="keep the last 10 s of raw camera MJPEG, write to CLIP on exit")

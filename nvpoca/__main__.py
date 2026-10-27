@@ -25,7 +25,7 @@ OBJECT_PATH = "/org/nvpoca/Daemon"
 CLIENT_USAGE = 0x08000000 + 0x08E00000 + 1  # v4l2loopback V4L2_EVENT_PRI_CLIENT_USAGE (v4l2loopback.c)
 SETTINGS = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "nvpoca" / "settings.json"
 # saved setting -> CLI flag that overrides it when given explicitly
-CLI_FLAG = {"enabled": "mode", "mode": "mode", "blur": "blur", "smooth": "smooth", "bg": "bg"}
+CLI_FLAG = {"enabled": "mode", "mode": "mode", "blur": "blur", "smooth": "smooth", "light": "light", "bg": "bg"}
 
 
 def load_settings(args, explicit: set[str]) -> dict:
@@ -34,6 +34,7 @@ def load_settings(args, explicit: set[str]) -> dict:
         "mode": args.mode if args.mode != "passthrough" else "blur",
         "blur": args.blur,
         "smooth": args.smooth or 0.0,
+        "light": args.light or 0.0,
         "bg": str(args.bg) if args.bg else "",
     }
     try:
@@ -193,6 +194,16 @@ class Daemon(ServiceInterface):
         if not 0 <= value <= 1:
             raise invalid("Smooth must be within 0..1 (0 = off)")
         self.sup.update("smooth", value)
+
+    @dbus_property()
+    def Light(self) -> "d":
+        return self.sup.settings["light"]
+
+    @Light.setter
+    def Light(self, value: "d"):
+        if not 0 <= value <= 1:
+            raise invalid("Light must be within 0..1 (0 = off)")
+        self.sup.update("light", value)
 
     @dbus_property()
     def Background(self) -> "s":

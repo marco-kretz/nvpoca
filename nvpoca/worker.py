@@ -82,6 +82,8 @@ class Control:
         effect.set_blur(s["blur"])
         if (effect.smoother.min_rate if effect.smoother else 0) != s["smooth"]:
             effect.set_smooth(s["smooth"] or None)
+        if (effect.light.strength if effect.light else 0) != s["light"]:
+            effect.set_light(s["light"] or None)
         if s["bg"] != self.bg_path:
             self.bg_path = s["bg"]
             try:

@@ -17,6 +17,9 @@ Panel {
   readonly property bool active: !!props.Active
   readonly property bool enabled: !!props.Enabled
   readonly property bool previewing: preview.running
+  readonly property bool lightOn: (props.Light || 0) > 0
+  // Light = 0 means off, so the strength to restore when switching back on lives here
+  property real lightStrength: 0.5
   // v4l2loopback serves one reader at a time, so the preview only works while no app streams.
   readonly property bool canPreview: running && (!active || previewing)
   // filled = the real camera is open, outline = idle, crossed out = daemon down
@@ -184,6 +187,43 @@ Panel {
               foreground: root.bar.foreground
               onToggled: root.set("Smooth", "d", checked ? 0 : 0.15)
             }
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            InfoText { id: lightLabel; text: "Key light"; opacity: 0.6; anchors.verticalCenter: parent.verticalCenter }
+            Item { width: parent.width - lightLabel.implicitWidth - lightSwitch.width - parent.spacing * 2; height: 1 }
+            ToggleSwitch {
+              id: lightSwitch
+              checked: root.lightOn
+              foreground: root.bar.foreground
+              onToggled: {
+                if (checked) root.lightStrength = root.props.Light
+                root.set("Light", "d", checked ? 0 : root.lightStrength)
+              }
+            }
+          }
+
+          // Strength caps the brightening (gain 1 + 2 * strength); how much is used is measured per frame.
+          Row {
+            width: parent.width
+            visible: root.lightOn
+            spacing: Style.space(8)
+
+            InfoText { id: boostLabel; text: "Max boost"; opacity: 0.6; anchors.verticalCenter: parent.verticalCenter }
+            PanelSlider {
+              id: boostSlider
+              bar: root.bar
+              width: parent.width - boostLabel.implicitWidth - boostValue.implicitWidth - parent.spacing * 2
+              minimum: 0.1
+              maximum: 1
+              step: 0.05
+              value: root.props.Light || root.lightStrength
+              onReleased: function(v) { root.set("Light", "d", Math.round(v * 20) / 20) }
+            }
+            InfoText { id: boostValue; text: "×" + (1 + 2 * boostSlider.liveValue).toFixed(1); anchors.verticalCenter: parent.verticalCenter }
           }
         }
 

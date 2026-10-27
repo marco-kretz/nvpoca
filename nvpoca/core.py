@@ -69,7 +69,7 @@ class Depth:
 
 
 class Effect:
-    """Matting + composition. mode/blur/smooth/background can change between frames (daemon)."""
+    """Matting + composition. mode/blur/smooth/light/background can change between frames (daemon)."""
 
     def __init__(self, args: argparse.Namespace):
         self.h, self.w = args.height, args.width
@@ -86,11 +86,15 @@ class Effect:
         # pure #00FF00 is the default key colour of OBS's chroma key filter
         self.green = torch.tensor([0.0, 1.0, 0.0], device="cuda", dtype=torch.half).view(1, 3, 1, 1)
         self.set_smooth(args.smooth)
+        self.set_light(args.light)
         self.set_blur(args.blur)
         self.set_background(load_image(args.bg) if args.bg else None)
 
     def set_smooth(self, min_rate: float | None) -> None:
         self.smoother = gpu.AlphaSmoother(min_rate) if min_rate else None
+
+    def set_light(self, strength: float | None) -> None:
+        self.light = gpu.KeyLight(strength) if strength else None
 
     def set_blur(self, sigma_1080p: float) -> None:
         self.sigma = sigma_1080p * self.h / 1080
@@ -105,6 +109,8 @@ class Effect:
             self.matter.reset()
         if self.smoother:
             self.smoother.prev = None
+        if self.light:
+            self.light.gain = None
 
     def matte(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(fgr, pha, raw pha before smoothing); passthrough returns src with full alpha."""
@@ -140,6 +146,8 @@ class Effect:
     def compose(self, src: torch.Tensor, fgr: torch.Tensor, pha: torch.Tensor) -> torch.Tensor:
         if not self.matter or self.mode == "passthrough":
             return src
+        if self.light:
+            fgr = self.light(src, fgr, pha)
         if self.mode == "green" or (self.mode == "replace" and self.bg is not None):
             back = self.green if self.mode == "green" else self.bg
             # a flat or new background shows every half-transparent edge pixel as a halo or smear: hard

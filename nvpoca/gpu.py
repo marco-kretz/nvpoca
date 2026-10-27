@@ -1,4 +1,4 @@
-"""GPU tensor ops: background fill, composition, alpha smoothing, YUYV packing.
+"""GPU tensor ops: background fill, composition, alpha smoothing, key light, YUYV packing.
 
 Images are float tensors shaped (1, C, H, W) in [0, 1] unless noted.
 """
@@ -105,6 +105,64 @@ class AlphaSmoother:
         return self.prev
 
 
+def luma(rgb: torch.Tensor) -> torch.Tensor:
+    r, g, b = rgb.unbind(1)
+    return (0.299 * r + 0.587 * g + 0.114 * b).unsqueeze(1)
+
+
+class KeyLight:
+    """Virtual frontal key light: brightens the person when they are underexposed or darker than
+    a bright background (backlight), strongest on the head and falling off softly like a large
+    softbox. The gain is measured each frame and eased in, so it doesn't pump with motion."""
+
+    def __init__(self, strength: float = 0.5, target: float = 0.42, backlit: float = 0.6, rate: float = 0.05,
+                 neutral: float = 0.5):
+        # untuned starting points: target = face luma below which it lights, backlit = least face
+        # luma as a share of the background's, rate = per-frame ease (~0.7 s at 30 fps),
+        # neutral = how white the added light is (0 = room light colour, 1 = grey)
+        self.strength, self.target, self.backlit, self.rate, self.neutral = strength, target, backlit, rate, neutral
+        self.gain = None
+
+    def __call__(self, src: torch.Tensor, fgr: torch.Tensor, pha: torch.Tensor) -> torch.Tensor:
+        """Lit fgr. Measured on src, as RVM's fgr is undefined on the background."""
+        h, w = fgr.shape[-2:]
+        small = (h // 8, w // 8)
+        y = luma(F.interpolate(src.float(), size=small, mode="area"))
+        a = F.interpolate(pha.float(), size=small, mode="area")
+        light = self.falloff(a)
+        person = (a > 0.9).float()
+        face = (y * person * light).sum() / (person * light).sum().clamp(min=1e-3)
+        back = (a < 0.1).float()
+        bg = (y * back).sum() / back.sum().clamp(min=1)
+        gain = ((self.backlit * bg).clamp(min=self.target) / face.clamp(min=0.02)).clamp(1, 1 + 2 * self.strength)
+        gain = torch.where(person.sum() > 64, gain, 1.0)  # stays on the GPU: an `if` would sync every frame
+        self.gain = gain if self.gain is None else self.gain + self.rate * (gain - self.gain)
+        k = 1 + (self.gain - 1) * F.interpolate(light, size=(h, w), mode="bilinear")
+        f = fgr.float()
+        y = luma(f).clamp(0, 1)
+        # ~k*y in the shadows, rolls off to 1 so highlights don't clip
+        lifted = 1 - (1 - y) ** k
+        # added light takes the pixel's colour pulled towards white: scaling the colour alone would
+        # amplify a warm room light into orange skin
+        tint = torch.lerp(f / y.clamp(min=1e-3), torch.ones_like(f), self.neutral)
+        return (f + (lifted - y) * tint).clamp(0, 1).to(fgr.dtype)
+
+    @staticmethod
+    def falloff(a: torch.Tensor) -> torch.Tensor:
+        """Gaussian centred just below the top of the person, at the middle of their upper part."""
+        h, w = a.shape[-2:]
+        body = (a > 0.5).float()
+        rows = torch.arange(h, device=a.device, dtype=torch.float).view(-1, 1)
+        cols = torch.arange(w, device=a.device, dtype=torch.float)
+        top = body.amax(-1).flatten().argmax()  # first row with person (argmax returns the first max)
+        upper = body * ((rows >= top) & (rows < top + 0.3 * h))
+        cx = (upper.sum(-2).flatten() * cols).sum() / upper.sum().clamp(min=1)
+        s = 0.6 * h
+        gy = torch.exp(-(((rows - top - 0.2 * h) / s) ** 2) / 2)
+        gx = torch.exp(-(((cols - cx) / s) ** 2) / 2)
+        return (gy * gx)[None, None]
+
+
 def to_yuyv(rgb: torch.Tensor) -> torch.Tensor:
     """(1, 3, H, W) RGB in [0, 1] -> (H, W * 2) uint8 YUYV, BT.601 limited range
     (what browsers and Zoom assume for YUYV webcams)."""
@@ -165,4 +223,20 @@ if __name__ == "__main__":
     s(a, img)
     assert torch.allclose(s(a + 1, img), a + 0.15)  # static image: alpha jump is flicker, damped
     assert torch.allclose(s(a + 1, img + 0.5), a + 1)  # image moved: alpha follows at once
+
+    # key light: dark person is lit with highlights kept, a well-lit one is left alone, backlight is lifted
+    pha = torch.zeros(1, 1, 256, 256, device=dev)
+    pha[..., 64:, 96:160] = 1
+    src = torch.full((1, 3, 256, 256), 0.15, device=dev)
+    src[..., 240:, 96:110] = 1  # white shirt
+    out = KeyLight(strength=1)(src, src, pha)
+    assert 0.3 < out[0, 0, 100, 128] < 0.5 and out[..., 240:, 96:110].min() > 0.99, out[0, 0, 100, 128]
+    src = torch.full_like(src, 0.5)
+    assert torch.allclose(KeyLight()(src, src, pha), src, atol=1e-3)
+    assert torch.allclose(KeyLight()(src * 0.3, src * 0.3, pha * 0), src * 0.3)  # no person: unchanged
+    src = torch.where(pha > 0, 0.45, 0.95).expand(-1, 3, -1, -1)  # bright enough, but in front of a window
+    assert KeyLight()(src, src, pha)[0, 0, 100, 128] > 0.5
+    src = torch.where(pha > 0, torch.tensor([0.2, 0.1, 0.05], device=dev).view(1, 3, 1, 1), 0.5)  # warm-lit skin
+    r, _, b = KeyLight(strength=1)(src, src, pha)[0, :, 100, 128]
+    assert r > 0.2 and r / b < 3, (r, b)  # brighter and less orange (input r/b = 4)
     print("ok")

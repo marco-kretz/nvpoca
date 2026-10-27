@@ -53,6 +53,7 @@ journalctl --user -u nvpoca -f                     # per-second timing while a r
 uv run python -m nvpoca --blur 10
 uv run python -m nvpoca --record clips/x.mjpeg     # keeps last 10 s raw; written on Ctrl+C / stop
 uv run python -m nvpoca --keep-chair               # experimental: keep the chair (depth model)
+uv run python -m nvpoca --light                    # brighten yourself when underexposed or backlit
 ```
 
 The first start per (variant, resolution, ratio) builds a TensorRT engine into `models/`
@@ -69,6 +70,7 @@ $B set-property $O Blur d 6                        # 0.5..40, sigma at 1080p
 $B set-property $O Mode s green                    # blur | replace | green (#00FF00 for chroma keyers)
 $B set-property $O Background s ~/Pictures/bg.jpg  # needed for replace
 $B set-property $O Smooth d 0                      # 0 = off, else min rate (0.15 default)
+$B set-property $O Light d 0.5                     # key light: 0 = off, else max strength 0..1
 ```
 
 Read-only: `Active` (camera open), `Loaded` (GPU worker running), `Fps`, `Latency` (ms).
@@ -77,7 +79,7 @@ Changes emit `PropertiesChanged`.
 ### Omarchy shell plugin
 
 `omarchy-plugin/` is a bar widget: camera icon (highlighted while an app uses the camera),
-effect on/off, blur slider, steady-edges toggle, blur/green/image switch (image once a background is set),
+effect on/off, blur slider, steady-edges toggle, key-light slider, blur/green/image switch (image once a background is set),
 and a Preview button that opens `/dev/video10` in mpv (only while no other app streams, since
 v4l2loopback serves one reader at a time).
 
