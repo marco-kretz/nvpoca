@@ -81,6 +81,10 @@ class Supervisor:
 
     async def on_readers(self, count: int) -> None:
         self.readers = count
+        if not count:
+            # a reader's S_PARM sticks to the device (Chromium sets 10000/300000), and PipeWire then
+            # fails to match a client's 30/1 ("no more input formats")
+            self.out.set_fps(BufferType.VIDEO_OUTPUT, self.args.fps)
         if count and not self.worker and not self.spawning:
             await self.start_worker()
         self.sync()
