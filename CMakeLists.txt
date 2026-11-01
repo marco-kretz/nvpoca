@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.28)
+project(nvpoca LANGUAGES CXX CUDA)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+find_package(CUDAToolkit REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+
+# TensorRT from the NVIDIA tarball (-DTENSORRT_ROOT=...) or system paths (AUR tensorrt)
+set(TENSORRT_ROOT "" CACHE PATH "TensorRT SDK root; empty = system paths")
+find_path(TENSORRT_INCLUDE NvInfer.h HINTS ${TENSORRT_ROOT}/include REQUIRED)
+find_library(NVINFER nvinfer HINTS ${TENSORRT_ROOT}/lib REQUIRED)
+find_library(NVONNXPARSER nvonnxparser HINTS ${TENSORRT_ROOT}/lib REQUIRED)
+
+add_library(kernels STATIC src/kernels.cu)
+target_link_libraries(kernels PUBLIC CUDA::cudart)
+
+add_executable(nvpoca src/main.cpp src/pipeline.cpp src/v4l2.cpp)
+target_include_directories(nvpoca SYSTEM PRIVATE ${TENSORRT_INCLUDE})
+target_link_libraries(nvpoca PRIVATE kernels CUDA::nvjpeg ${NVINFER} ${NVONNXPARSER} PkgConfig::SYSTEMD)
+target_compile_definitions(nvpoca PRIVATE NVPOCA_MODELS="${CMAKE_SOURCE_DIR}/models")
+target_compile_options(nvpoca PRIVATE -Wall -Wextra)
+
+enable_testing()
+add_executable(kernels_test tests/kernels_test.cu)
+target_link_libraries(kernels_test PRIVATE kernels)
+add_test(NAME kernels COMMAND kernels_test)
