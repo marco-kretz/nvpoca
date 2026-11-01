@@ -7,15 +7,13 @@ Only needs CPU torch (no CUDA, no TensorRT), e.g. in a throwaway venv:
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
+from rvm.model import MattingNetwork  # tools/rvm: RVM model code (GPL-3.0), vendored with nvpoca tweaks
 from torch import nn
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from nvpoca.rvm.model import MattingNetwork  # noqa: E402
 
 
 class Fixed(nn.Module):

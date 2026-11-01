@@ -1,0 +1,29 @@
+# Status and live controls for the nvpoca virtual camera daemon (org.nvpoca.Daemon on D-Bus).
+id = "marco/nvpoca"
+name = "nvpoca camera"
+version = "2.0.0"
+plugin_api = 43
+author = "marco"
+license = "GPL-3.0-only"
+dependencies = []
+tags = ["camera", "webcam"]
+icon = "video"
+description = "Shows when the camera is in use, toggles the background effect, adjusts blur and key light, opens a preview."
+
+# Mirrors the daemon's properties into noctalia.state for the widget and the panel.
+[[service]]
+id = "daemon"
+entry = "service.luau"
+
+[[widget]]
+id = "bar"
+entry = "bar.luau"
+
+[[panel]]
+id = "panel"
+entry = "panel.luau"
+width = 340
+height = 470
+placement = "attached"
+position = "auto"
+open_near_click = true

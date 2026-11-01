@@ -2,118 +2,101 @@
 
 nVIDIA POstprocessing CAmera: real-time background blur/replacement for a webcam on
 Linux, exposed as a v4l2loopback virtual camera. NVIDIA-only (CUDA, nvJPEG, TensorRT).
+One small C++/CUDA daemon; Python is only needed once, to export the model.
 
 Pipeline: MJPEG capture → nvJPEG decode → [RVM](https://github.com/PeterL1n/RobustVideoMatting)
 FP16 (TensorRT) with recurrent state and Deep Guided Filter refiner → composite with RVM's
 decontaminated foreground → BT.601 YUYV on GPU → one download → `/dev/video10`.
 
-## Setup (Arch / Omarchy)
+## Setup (Arch / CachyOS)
 
-Requirements: NVIDIA driver with CUDA 13 support, `uv`, kernel headers for the running kernel.
+Requirements: NVIDIA driver, `cuda` (13.x), `cmake`, `ninja`, TensorRT 11 for that CUDA.
 
 ```bash
-# virtual camera
-sudo pacman -S v4l2loopback-dkms v4l2loopback-utils
+# virtual camera (CachyOS kernels ship the module; elsewhere: pacman -S v4l2loopback-dkms)
 echo 'options v4l2loopback devices=1 video_nr=10 card_label="nvpoca Cam" exclusive_caps=1 max_buffers=2' \
   | sudo tee /etc/modprobe.d/v4l2loopback.conf
 echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf
 sudo modprobe v4l2loopback
 
-# python env (torch cu130, TensorRT 11 wheels; no system CUDA/cuDNN/TensorRT needed)
-uv sync
+# TensorRT: AUR `tensorrt`, or the NVIDIA tarball (only include/, lib/, bin/ are needed)
+mkdir -p ~/.local/opt && cd ~/.local/opt
+curl -L https://developer.download.nvidia.com/compute/machine-learning/tensorrt/11.4.0/tars/TensorRT-Enterprise-11.4.0.106-Linux-x86_64-cuda-13.4-Release-external.tar.zst \
+  | tar --zstd -x --wildcards '*/include/*' '*/lib/*' '*/bin/*'
 
-# RVM weights (GPL-3.0, same as the vendored model code in nvpoca/rvm)
+# build (drop -DTENSORRT_ROOT with the AUR package)
+cmake -S . -B build -G Ninja -DTENSORRT_ROOT=$HOME/.local/opt/TensorRT-11.4.0.106
+cmake --build build && ./build/kernels_test
+
+# RVM weights (GPL-3.0, same as the vendored model code in tools/rvm) and the one-time ONNX
+# export per resolution, with CPU torch in a throwaway venv
 mkdir -p models
-for f in rvm_mobilenetv3.pth rvm_resnet50.pth; do
-  curl -L -o models/$f https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/$f
-done
-
-# Depth Anything V2 Small for --keep-chair (Apache-2.0, code vendored in nvpoca/depth)
-curl -L -o models/depth_anything_v2_vits.pth \
-  https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth
+curl -L -o models/rvm_mobilenetv3.pth \
+  https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3.pth
+python -m venv /tmp/rvm && /tmp/rvm/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+/tmp/rvm/bin/pip install onnx onnxscript
+/tmp/rvm/bin/python tools/export_onnx.py --size 1920x1080      # → models/rvm_mobilenetv3_1920x1080_r0.250_aa.onnx
 ```
+
+The first start per (variant, resolution, ratio) builds a TensorRT engine from the ONNX into
+`models/` (~30 s), again after a TensorRT upgrade (engines only load in the version that built
+them, so their names carry it; old ones can be deleted).
 
 ## Usage
 
-`python -m nvpoca` is a small supervisor (no torch/CUDA, ~20 MB RAM): it keeps `/dev/video10`
-ready and, when an app (browser, Zoom, the preview) starts reading it, launches the GPU worker
-(`nvpoca.worker`), which loads the models and opens the real camera. `--unload-after` seconds
-(default 60) after the last reader the worker exits, which frees all of its VRAM; a CUDA
-context only goes away with its process. Cold start to the first camera frame ~1.6 s (the app
-sees black meanwhile), warm ~0.3 s. Settings live in `~/.config/nvpoca/settings.json` and can
-be changed at runtime over D-Bus.
+`build/nvpoca` keeps `/dev/video10` ready (black frame) and, when an app (browser, Zoom, the
+preview) starts reading it, loads the engine and opens the real camera. `--unload-after`
+seconds (default 60) after the last reader it frees the GPU by resetting the CUDA context.
+Cold start to the first camera frame ~0.4 s (the app sees black meanwhile). Settings live in
+`~/.config/nvpoca/settings.conf` (`key=value`) and can be changed at runtime over D-Bus.
 
 ```bash
 # run as a systemd user service (unit file in contrib/, linked from the repo)
-systemctl --user link ~/Development/nvpoca/contrib/nvpoca.service
+systemctl --user link ~/Development/mk-nvpoca/contrib/nvpoca.service
 systemctl --user enable --now nvpoca.service
 journalctl --user -u nvpoca -f                     # per-second timing while a reader is attached
 
 # or in the foreground; flags given here override the saved settings
-uv run python -m nvpoca --blur 10
-uv run python -m nvpoca --record clips/x.mjpeg     # keeps last 10 s raw; written on Ctrl+C / stop
-uv run python -m nvpoca --keep-chair               # experimental: keep the chair (depth model)
-uv run python -m nvpoca --light                    # brighten yourself when underexposed or backlit
+./build/nvpoca --blur 10
+./build/nvpoca --light                             # brighten yourself when underexposed or backlit
+./build/nvpoca --help
 ```
-
-The first start per (variant, resolution, ratio) builds a TensorRT engine into `models/`
-(~20–40 s), again after a TensorRT upgrade (engines only load in the version that built them, so
-their names carry it; engines of older versions can be deleted). `--backend torch` skips TensorRT.
 
 ### D-Bus (`org.nvpoca.Daemon`, session bus)
 
 ```bash
-B="busctl --user"; O="org.nvpoca.Daemon /org/nvpoca/Daemon org.nvpoca.Daemon"
-$B get-property $O Active                          # is the camera in use?
-$B set-property $O Enabled b false                 # passthrough
-$B set-property $O Blur d 6                        # 0.5..40, sigma at 1080p
-$B set-property $O Mode s green                    # blur | replace | green (#00FF00 for chroma keyers)
-$B set-property $O Background s ~/Pictures/bg.jpg  # needed for replace
-$B set-property $O Smooth d 0                      # 0 = off, else min rate (0.15 default)
-$B set-property $O Light d 0.5                     # key light: 0 = off, else max strength 0..1
+o() { busctl --user "$1" org.nvpoca.Daemon /org/nvpoca/Daemon org.nvpoca.Daemon "${@:2}"; }
+o get-property Active                              # is the camera in use?
+o set-property Enabled b false                     # passthrough
+o set-property Blur d 6                            # 0.5..40, sigma at 1080p
+o set-property Mode s green                        # blur | replace | green (#00FF00 for chroma keyers)
+o set-property Background s ~/Pictures/bg.jpg      # JPEG, needed for replace
+o set-property Smooth d 0                          # 0 = off, else min rate (0.15 default)
+o set-property Light d 0.5                         # key light: 0 = off, else max strength 0..1
 ```
 
-Read-only: `Active` (camera open), `Loaded` (GPU worker running), `Fps`, `Latency` (ms).
+Read-only: `Active` (camera open), `Loaded` (engine in VRAM), `Fps`, `Latency` (ms).
 Changes emit `PropertiesChanged`.
 
-### Omarchy shell plugin
+### Noctalia plugin
 
-`omarchy-plugin/` is a bar widget: camera icon (highlighted while an app uses the camera),
-effect on/off, blur slider, steady-edges toggle, key-light slider, blur/green/image switch (image once a background is set),
-and a Preview button that opens `/dev/video10` in mpv (only while no other app streams, since
-v4l2loopback serves one reader at a time).
+`noctalia-plugin/` (Noctalia 5, Luau): a bar widget (crossed out = daemon not running,
+outline = idle, filled + primary = camera in use; left click opens the panel, right click
+toggles the effect) and a panel with effect on/off, mode, blur, steady edges, key light and a
+Preview button that opens `/dev/video10` in ffplay (only while no other app streams, since
+v4l2loopback serves one reader at a time). A headless service follows the daemon with
+`gdbus monitor`.
 
 ```bash
-ln -sfn ~/Development/nvpoca/omarchy-plugin ~/.config/omarchy/plugins/local.nvpoca
-omarchy-shell shell rescanPlugins
-omarchy bar put local.nvpoca --before local.proton
+ln -sfn ~/Development/mk-nvpoca/noctalia-plugin ~/.local/share/noctalia/plugins/nvpoca
+noctalia msg plugins enable marco/nvpoca
+# then add "nvpoca camera" to the bar from Settings → Bar (Add widget)
 ```
-
-Bar icon: crossed out = daemon not running, outline = idle (camera off), filled + accent =
-camera in use. The shell watches plugins with `inotifywait -r`, which does not follow the
-symlink, so after editing the plugin run `omarchy restart shell`.
 
 Every second while a reader is attached the journal gets a line with per-stage milliseconds.
-`capture` is time spent waiting for the next camera frame (≈ idle), `decode` includes the JPEG
-upload, `latency` is from the camera's USB start-of-frame timestamp to the frame being written
-to the loopback device.
-
-## Comparing configs
-
-A clip can also come from a live session (`--record`), so a problem can be captured the
-moment it is visible.
-
-```bash
-uv run python -m nvpoca.compare clips/chair.mjpeg --record 10      # record a clip once
-uv run python -m nvpoca.compare clips/chair.mjpeg --alpha \
-  -c "" -c="--variant resnet50" -c="--smooth"                     # labelled grid video + scores
-```
-
-Each `-c` is a set of normal `nvpoca` flags (write it as `-c="..."`). Output is a grid
-video next to the clip (`--alpha` shows the matte instead of the composite) and three scores
-(x1000, lower is better): `flicker` = alpha change where the camera image did not change,
-`lag` = how far smoothing trails the raw alpha where the image did change, `soft` = share of
-semi-transparent pixels, which exposes background objects kept as a faint ghost.
+`capture` is time spent waiting for the next camera frame (≈ idle), `decode` the JPEG upload
+and nvJPEG call, `gpu` inference + effects + download, `latency` is from the camera's USB
+start-of-frame timestamp to the frame being written to the loopback device.
 
 ## Measurements
 
@@ -171,7 +154,7 @@ glasses frame and headrest at the right side of the head.
 consistently (glasses flicker 0.50 vs 0.57 unsmoothed) but is neutral or worse on the chair
 clips, so 0.25 stays the default.
 
-### Keeping the chair (`--keep-chair`)
+### Keeping the chair (`--keep-chair`, Python version only, removed in Phase 6)
 
 RVM only knows people, so the chair behind you is background and its edges flicker where
 your head and shoulders meet it. `--keep-chair` adds Depth Anything V2 Small (518×294,
@@ -259,8 +242,28 @@ differed from RVM's on only 0.6–1.9 % of the frame across all clips: a slightl
 backrest barely shows. Not worth ~18 ms more GPU per frame, ~2 GB more VRAM and ~20 ms more
 latency.
 
+## Phase 6: C++/CUDA daemon
+
+The Python supervisor + worker (torch, torchvision, TensorRT wheels via uv, several GB of
+dependencies) is replaced by one C++/CUDA process: V4L2 capture and loopback output, nvJPEG,
+RVM through the TensorRT C++ API, the effects as CUDA kernels (ports of the former
+`gpu.py`, with its asserts as `tests/kernels_test.cu`), sd-bus for the same D-Bus API.
+VRAM is freed by `cudaDeviceReset()` instead of ending a worker process. Dropped with Python:
+`--keep-chair` (depth model), `--record` and the `compare` tool, `--backend torch`, non-JPEG
+backgrounds.
+
+Live, 1080p30, blur σ 4, `--smooth` (RTX 5070 Ti, C920):
+
+| | Python (Phase 2–5) | C++ |
+|---|---|---|
+| GPU work per frame | ~3.5 ms | 2.5–2.9 ms (TRT 11.4, RVM 1.25 ms) |
+| latency | ~12 ms | 12–13 ms |
+| cold start to first frame | ~1.6 s | 0.36 s |
+| RAM while streaming | 1.8 GB | 0.5 GB |
+| RAM idle | ~20 MB (supervisor) | ~210 MB (TensorRT linked in) |
+| VRAM while loaded | ~630 MB | ~535 MB |
+
 ## License
 
-GPL-3.0 (`LICENSE`), as required by the vendored RobustVideoMatting code in `nvpoca/rvm`.
-`nvpoca/depth` is Depth Anything V2 (Apache-2.0). Model weights are downloaded separately under
-their own licenses.
+GPL-3.0 (`LICENSE`), as required by the vendored RobustVideoMatting code in `tools/rvm`.
+Model weights are downloaded separately under their own licenses.
