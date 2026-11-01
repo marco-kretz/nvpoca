@@ -100,6 +100,8 @@ Pipeline::Pipeline(const std::filesystem::path& onnx, const std::filesystem::pat
     ctx_->setTensorAddress("src", src_);
     ctx_->setTensorAddress("fgr", fgr_);
     ctx_->setTensorAddress("pha", pha_);
+    denoise_acc_ = alloc<float>(3 * n);
+    denoise_rate_ = alloc<float>(n);
     pha_s_ = alloc<float>(n);
     gray_ = alloc<float>(n / 16);
     prev_gray_ = alloc<float>(n / 16);
@@ -130,7 +132,7 @@ void Pipeline::reset() {
     LightState fresh;
     CK(cudaMemcpyAsync(light_, &fresh, sizeof fresh, cudaMemcpyHostToDevice, stream_));
     CK(cudaStreamSynchronize(stream_));
-    first_ = true;
+    first_ = denoise_first_ = true;
 }
 
 bool Pipeline::decode(const uint8_t* jpeg, size_t size) {
@@ -183,6 +185,13 @@ bool Pipeline::set_background(const std::string& path) {
 
 void Pipeline::process(const EffectParams& p) {
     Mode mode = p.mode == Mode::replace && !bg_ ? Mode::blur : p.mode;
+    if (mode != Mode::passthrough && p.denoise > 0) {
+        // strength 1 averages over ~10 frames where the image is static
+        k::denoise(rgb_, w_, h_, denoise_acc_, denoise_rate_, 1 - 0.9f * p.denoise, denoise_first_, stream_);
+        denoise_first_ = false;
+    } else {
+        denoise_first_ = true;
+    }
     if (mode != Mode::passthrough) {
         k::to_half(planes(), src_, stream_);
         for (int i = 0; i < 4; ++i) {

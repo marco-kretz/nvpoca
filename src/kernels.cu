@@ -10,6 +10,8 @@ namespace {
 // (~0.7 s at 30 fps), neutral = how white the added light is (0 = room light colour, 1 = grey)
 constexpr float kTarget = 0.42f, kBacklit = 0.6f, kRate = 0.05f, kNeutral = 0.5f;
 constexpr int kMaxTaps = 129;
+// denoise: mean colour change below kDenoiseNoise counts as noise, kDenoiseMotion above it as motion
+constexpr float kDenoiseNoise = 2 / 255.f, kDenoiseMotion = 6 / 255.f;
 
 struct Gauss {
     int r;
@@ -80,6 +82,30 @@ __global__ void to_half_k(Planes p, __half* dst) {
     dst[i] = __float2half(c.x);
     dst[n + i] = __float2half(c.y);
     dst[2 * n + i] = __float2half(c.z);
+}
+
+__global__ void denoise_rate_k(const uint8_t* rgb, const float* acc, float* rate, int w, int h, float min_rate,
+                               bool reset) {
+    XY(w, h);
+    int n = w * h;
+    // 3x3 mean of the signed difference: sensor noise averages out, real change doesn't
+    float d[3] = {};
+    int cnt = 0;
+    for (int yy = max(y - 1, 0); yy <= min(y + 1, h - 1); ++yy)
+        for (int xx = max(x - 1, 0); xx <= min(x + 1, w - 1); ++xx, ++cnt)
+            for (int c = 0; c < 3; ++c) d[c] += rgb[c * n + yy * w + xx] / 255.f - acc[c * n + yy * w + xx];
+    float diff = (fabsf(d[0]) + fabsf(d[1]) + fabsf(d[2])) / (3 * cnt);
+    rate[y * w + x] = reset ? 1 : fminf(fmaxf((diff - kDenoiseNoise) / kDenoiseMotion, min_rate), 1.f);
+}
+
+__global__ void denoise_apply_k(uint8_t* rgb, float* acc, const float* rate, int w, int h) {
+    XY(w, h);
+    int n = w * h, i = y * w + x;
+    for (int c = 0; c < 3; ++c) {
+        float& a = acc[c * n + i];
+        a += rate[i] * (rgb[c * n + i] / 255.f - a);
+        rgb[c * n + i] = static_cast<uint8_t>(rintf(a * 255));
+    }
 }
 
 __global__ void gray4_k(Planes p, float* gray) {
@@ -311,6 +337,11 @@ __global__ void compose_k(ComposeIn in, uint8_t* yuyv) {
 }  // namespace
 
 namespace k {
+
+void denoise(uint8_t* rgb, int w, int h, float* acc, float* rate, float min_rate, bool reset, cudaStream_t s) {
+    denoise_rate_k<<<grid(w, h), dim3(32, 8), 0, s>>>(rgb, acc, rate, w, h, min_rate, reset);
+    denoise_apply_k<<<grid(w, h), dim3(32, 8), 0, s>>>(rgb, acc, rate, w, h);
+}
 
 void to_half(Planes src, __half* dst, cudaStream_t s) { to_half_k<<<grid(src.w, src.h), dim3(32, 8), 0, s>>>(src, dst); }
 

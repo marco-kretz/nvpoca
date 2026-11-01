@@ -96,6 +96,24 @@ void test_smoother() {
     for (float a : pha_s.get()) CHECK(std::fabs(a - 1) < 1e-5f);  // image moved: alpha follows at once
 }
 
+void test_denoise() {
+    constexpr int w = 64, h = 64, n = w * h;
+    Dev<float> acc(3 * n), rate(n);
+    std::srand(1);
+    auto noisy = [](int, int, int) { return 100 + std::rand() % 21 - 10; };  // +-10/255 sensor noise
+    float var = 0;
+    for (int f = 0; f < 30; ++f) {
+        Image img(w, h, noisy);
+        k::denoise(img.d.p, w, h, acc.p, rate.p, 0.1f, f == 0, 0);
+        if (f == 29)
+            for (uint8_t v : img.d.get()) var += (v - 100.f) * (v - 100.f) / (3 * n);
+    }
+    CHECK(var < 37 / 4.f);  // static image: noise variance (37 for uniform +-10) drops by far more than 4x
+    Image moved(w, h, [](int, int, int) { return 200; });
+    k::denoise(moved.d.p, w, h, acc.p, rate.p, 0.1f, false, 0);
+    for (uint8_t v : moved.d.get()) CHECK(v == 200);  // a real change goes through at once, no ghost
+}
+
 // key light on a 256x256 frame with a person at x 96..159, y 64..255; returns the YUYV output
 std::vector<uint8_t> lit(auto colour, bool person, float strength, LightState* st_out = nullptr) {
     constexpr int n = 256;
@@ -145,6 +163,7 @@ int main() {
     test_blur();
     test_smoother();
     test_light();
+    test_denoise();
     CHECK(cudaDeviceSynchronize() == cudaSuccess);
     std::puts("ok");
 }

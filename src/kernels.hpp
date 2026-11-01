@@ -26,6 +26,10 @@ struct ComposeParams {
 
 namespace k {
 
+// motion-adaptive temporal denoise of the planar RGB in place: static areas are averaged over
+// frames (down to min_rate per frame), moving ones follow at once. acc: 3*w*h, rate: w*h floats
+void denoise(uint8_t* rgb, int w, int h, float* acc, float* rate, float min_rate, bool reset, cudaStream_t s);
+
 // (1, 3, h, w) half NCHW model input
 void to_half(Planes src, __half* dst, cudaStream_t s);
 

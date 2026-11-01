@@ -44,6 +44,9 @@ local function render()
     section(`Blur · {props.Blur or 0}`, ui.slider({ min = 1, max = 20, step = 0.5, value = props.Blur or 4,
       enabled = running and props.Mode == "blur",
       onChange = function(v) set("Blur", "d", v) end })),
+    section(`Denoise · {props.Denoise or 0}`, ui.slider({ min = 0, max = 1, step = 0.1, value = props.Denoise or 0,
+      enabled = running and props.Enabled == true,
+      onChange = function(v) set("Denoise", "d", v) end })),
     ui.row({ gap = 12, align = "center" }, {
       ui.toggle({ checked = (props.Smooth or 0) > 0, enabled = running,
         onChange = function(v) set("Smooth", "d", v == "true" and 0.15 or 0) end }),

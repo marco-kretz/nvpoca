@@ -73,6 +73,7 @@ o set-property Mode s green                        # blur | replace | green (#00
 o set-property Background s ~/Pictures/bg.jpg      # JPEG, needed for replace
 o set-property Smooth d 0                          # 0 = off, else min rate (0.15 default)
 o set-property Light d 0.5                         # key light: 0 = off, else max strength 0..1
+o set-property Denoise d 0.5                       # temporal denoise of static areas: 0 = off .. 1 (~10 frames)
 ```
 
 Read-only: `Active` (camera open), `Loaded` (engine in VRAM), `Fps`, `Latency` (ms).

@@ -15,6 +15,7 @@ struct EffectParams {
     float sigma;   // blur sigma in output pixels
     float smooth;  // min EMA rate, 0 = off
     float light;   // key light strength, 0 = off
+    float denoise; // temporal denoise strength, 0 = off
 };
 
 class Pipeline {
@@ -53,6 +54,7 @@ private:
     __half *src_, *fgr_, *pha_;
     void *rec_in_[4], *rec_out_[4];
     size_t rec_bytes_[4];
+    float *denoise_acc_, *denoise_rate_;
     float *pha_s_, *gray_, *prev_gray_, *rate_, *light_scratch_;
     float4 *blur_, *blur_tmp_;
     uchar4* bg_storage_ = nullptr;
@@ -62,5 +64,6 @@ private:
     uint8_t* host_yuyv_ = nullptr;
 
     bool first_ = true;  // no alpha history yet
+    bool denoise_first_ = true;
     float last_smooth_ = 0, last_light_ = 0;
 };

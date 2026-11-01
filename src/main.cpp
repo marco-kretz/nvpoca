@@ -33,7 +33,7 @@ constexpr const char* kPath = "/org/nvpoca/Daemon";
 struct Settings {
     bool enabled = true;
     std::string mode = "blur";
-    double blur = 4, smooth = 0.15, light = 0;
+    double blur = 4, smooth = 0.15, light = 0, denoise = 0.5;
     std::string bg;
 };
 
@@ -56,6 +56,7 @@ std::optional<std::string> invalid(const std::string& key, double v) {
     if (key == "blur" && !(v >= 0.5 && v <= 40)) return "Blur must be within 0.5..40";
     if (key == "smooth" && !(v >= 0 && v <= 1)) return "Smooth must be within 0..1 (0 = off)";
     if (key == "light" && !(v >= 0 && v <= 1)) return "Light must be within 0..1 (0 = off)";
+    if (key == "denoise" && !(v >= 0 && v <= 1)) return "Denoise must be within 0..1 (0 = off)";
     return std::nullopt;
 }
 
@@ -82,6 +83,7 @@ const char* kUsage = R"(usage: nvpoca [options]
   --smooth [MIN_RATE]  damp alpha flicker where the image is static, 0..1 (default 0.15)
   --no-smooth          raw RVM alpha
   --light [STRENGTH]   virtual key light when underexposed or backlit, 0..1 (bare: 0.5)
+  --denoise STRENGTH   temporal noise filter for static areas, 0..1 (default 0.5, 0 = off)
   --variant NAME       mobilenetv3 | resnet50 (default mobilenetv3)
   --ratio R            RVM downsample ratio (default: 480 px on the long side)
   --input DEV          real camera (default /dev/video0)
@@ -139,6 +141,9 @@ Args parse(int argc, char** argv) {
         } else if (f == "--light") {
             s.light = optional(0.5);
             a.explicit_.insert("light");
+        } else if (f == "--denoise") {
+            s.denoise = number(value(), f);
+            a.explicit_.insert("denoise");
         } else if (f == "--variant") {
             a.variant = value();
             if (a.variant != "mobilenetv3" && a.variant != "resnet50") usage("--variant: " + a.variant);
@@ -163,8 +168,8 @@ Args parse(int argc, char** argv) {
             usage("unknown option " + f);
         }
     }
-    for (const char* key : {"blur", "smooth", "light"})
-        if (auto err = invalid(key, key[0] == 'b' ? s.blur : key[0] == 's' ? s.smooth : s.light)) usage(*err);
+    for (auto [key, v] : {std::pair{"blur", s.blur}, {"smooth", s.smooth}, {"light", s.light}, {"denoise", s.denoise}})
+        if (auto err = invalid(key, v)) usage(*err);
     if (s.mode == "replace" && s.bg.empty()) usage("--mode replace needs --bg");
     if (auto err = invalid_background(s.bg)) usage(*err);
     if (a.ratio == 0) a.ratio = std::min(1.0, 480.0 / std::max(a.w, a.h));
@@ -194,6 +199,7 @@ void load_settings(Args& a) {
         else if (key == "blur" && num) s.blur = d;
         else if (key == "smooth" && num) s.smooth = d;
         else if (key == "light" && num) s.light = d;
+        else if (key == "denoise" && num) s.denoise = d;
         else if (key == "bg" && !invalid_background(v)) s.bg = v;
     }
 }
@@ -206,7 +212,7 @@ void save_settings(const Settings& s) {
     {
         std::ofstream f(tmp);
         f << "enabled=" << (s.enabled ? "true" : "false") << "\nmode=" << s.mode << "\nblur=" << s.blur
-          << "\nsmooth=" << s.smooth << "\nlight=" << s.light << "\nbg=" << s.bg << "\n";
+          << "\nsmooth=" << s.smooth << "\nlight=" << s.light << "\ndenoise=" << s.denoise << "\nbg=" << s.bg << "\n";
         if (!f) return log("cannot write %s", tmp.c_str());
     }
     fs::rename(tmp, path, ec);
@@ -250,7 +256,7 @@ struct Daemon {
 // ---- GPU thread ----
 
 struct Applied {
-    EffectParams params{Mode::blur, 4, 0, 0};
+    EffectParams params{Mode::blur, 4, 0, 0, 0};
     std::optional<std::string> bg;  // nullopt = not loaded into this pipeline yet
 };
 
@@ -264,7 +270,7 @@ void apply(Daemon& d, Pipeline& p, Applied& a) {
     }
     Mode mode = s.mode == "green" ? Mode::green : s.mode == "replace" ? Mode::replace : Mode::blur;
     a.params = {s.enabled ? mode : Mode::passthrough, static_cast<float>(s.blur * d.args.h / 1080),
-                static_cast<float>(s.smooth), static_cast<float>(s.light)};
+                static_cast<float>(s.smooth), static_cast<float>(s.light), static_cast<float>(s.denoise)};
     if (a.bg != s.bg) {
         a.bg = s.bg;
         p.set_background(s.bg);
@@ -404,6 +410,7 @@ int get_prop(sd_bus*, const char*, const char*, const char* prop, sd_bus_message
     if (p == "Blur") return sd_bus_message_append(reply, "d", s.blur);
     if (p == "Smooth") return sd_bus_message_append(reply, "d", s.smooth);
     if (p == "Light") return sd_bus_message_append(reply, "d", s.light);
+    if (p == "Denoise") return sd_bus_message_append(reply, "d", s.denoise);
     if (p == "Background") return sd_bus_message_append(reply, "s", s.bg.c_str());
     if (p == "Active") return sd_bus_message_append(reply, "b", st.active);
     if (p == "Loaded") return sd_bus_message_append(reply, "b", st.loaded);
@@ -438,9 +445,9 @@ int set_prop(sd_bus* bus, const char*, const char*, const char* prop, sd_bus_mes
     } else {
         double v;
         if ((r = sd_bus_message_read(value, "d", &v)) < 0) return r;
-        std::string key = p == "Blur" ? "blur" : p == "Smooth" ? "smooth" : "light";
+        std::string key = p == "Blur" ? "blur" : p == "Smooth" ? "smooth" : p == "Light" ? "light" : "denoise";
         if (auto e = invalid(key, v)) return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, e->c_str());
-        (key == "blur" ? s.blur : key == "smooth" ? s.smooth : s.light) = v;
+        (key == "blur" ? s.blur : key == "smooth" ? s.smooth : key == "light" ? s.light : s.denoise) = v;
     }
     {
         std::lock_guard lk(d.st.m);
@@ -460,6 +467,7 @@ const sd_bus_vtable kVtable[] = {
     SD_BUS_WRITABLE_PROPERTY("Blur", "d", get_prop, set_prop, 0, kEmits),
     SD_BUS_WRITABLE_PROPERTY("Smooth", "d", get_prop, set_prop, 0, kEmits),
     SD_BUS_WRITABLE_PROPERTY("Light", "d", get_prop, set_prop, 0, kEmits),
+    SD_BUS_WRITABLE_PROPERTY("Denoise", "d", get_prop, set_prop, 0, kEmits),
     SD_BUS_WRITABLE_PROPERTY("Background", "s", get_prop, set_prop, 0, kEmits),
     SD_BUS_PROPERTY("Active", "b", get_prop, 0, kEmits),  // the real camera is open because an app reads ours
     SD_BUS_PROPERTY("Loaded", "b", get_prop, 0, kEmits),  // models in VRAM
